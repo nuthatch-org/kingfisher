@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>kingfisher</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <canvas id="sky"></canvas>
+
+    <header class="bar">
+      <div class="brand">kingfisher</div>
+      <span class="chip" id="cwd">…</span>
+      <span class="chip dim" id="model">no session yet</span>
+      <span class="chip" id="auth">auth ?</span>
+      <span class="chip" id="state">idle</span>
+      <span class="spacer"></span>
+      <div class="gauge" title="context in use">
+        <span class="label">context</span>
+        <div class="track"><div class="fill" id="ctx-fill"></div></div>
+        <span class="val" id="ctx">–</span>
+      </div>
+      <div class="gauge"><span class="label">cost</span><span class="val" id="cost">–</span></div>
+      <div class="gauge"><span class="label">plan</span><span class="val" id="rate">–</span></div>
+    </header>
+
+    <aside class="panel">
+      <div id="log"></div>
+      <form class="dock">
+        <textarea id="prompt" rows="2" placeholder="Tell the agent what to do. Enter sends, Shift+Enter for a new line."></textarea>
+        <div class="dock-actions">
+          <button type="button" id="interrupt" disabled title="Esc">Interrupt</button>
+          <button type="button" id="send" class="primary">Send</button>
+        </div>
+      </form>
+    </aside>
+
+    <div id="perms"></div>
+
+    <section id="drawer">
+      <div class="drawer-head"><span id="drawer-title"></span><button id="drawer-close" type="button">×</button></div>
+      <div id="drawer-body"></div>
+    </section>
+
+    <footer class="foot">
+      <span class="chip warn" id="conn">connecting</span>
+      <span class="chip dim" id="backend">…</span>
+      <span class="chip dim" id="files">…</span>
+      <span class="chip dim" id="version"></span>
+    </footer>
+
+    <div id="tip"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

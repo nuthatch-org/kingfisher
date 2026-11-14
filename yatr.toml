@@ -1,0 +1,36 @@
+[tasks.web-install]
+cwd = "web"
+run = ["pnpm install --frozen-lockfile"]
+no_cache = true
+
+[tasks.web]
+cwd = "web"
+run = ["pnpm run build"]
+no_cache = true
+depends = ["web-install"]
+
+[tasks.fmt]
+run = ["cargo fmt"]
+no_cache = true
+
+[tasks.fmt-check]
+run = ["cargo fmt --check"]
+no_cache = true
+
+[tasks.lint]
+run = ["cargo clippy --all-targets -- -D warnings"]
+no_cache = true
+depends = ["web"]
+
+[tasks.test]
+run = ["cargo test"]
+no_cache = true
+depends = ["web"]
+
+[tasks.build]
+run = ["cargo build --release -p kingfisherd"]
+no_cache = true
+depends = ["web"]
+
+[tasks.ci]
+depends = ["fmt-check", "lint", "test", "build"]
