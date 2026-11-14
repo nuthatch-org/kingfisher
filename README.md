@@ -16,6 +16,27 @@ Runs Claude Code first, by spawning the unmodified official `claude` binary unde
 login. kingfisher never reads, stores or forwards credentials. Other agents come later, through
 adapters.
 
+## One per project
+
+The usual way to run it: in the folder where a Claude Code session is open,
+
+```sh
+kingfisherd --here            # add --tailscale to watch from a phone
+```
+
+It watches that project's sessions and nothing else, picks a free port, and opens the browser.
+Run another in another project and each gets its own warehouse.
+
+Inside, the agent's work is spelled out where it happens: a card over the machine shows the exact
+edit (the diff, with its +/− counts), the command and its output, or the first lines of what was
+read. Shell commands go to the machine for what they do: tests to the test rig, whose lamps and
+readout give the pass and fail counts; builds to the assembly line; `gh`, `curl` and `ssh` to the
+comms dish; `git commit` and `push` to the loading bay, where a crate labelled with the commit
+message rolls out. A beacon stands over the file being worked on in the table's city, and a line
+traces the files touched this turn. The scoreboard over the racks counts reads, edits with lines
+added and removed, commands, test results and commits; the board on the side wall is the agent's
+own to-do list when it keeps one, and a log of recent work otherwise.
+
 ## Running it
 
 ```sh

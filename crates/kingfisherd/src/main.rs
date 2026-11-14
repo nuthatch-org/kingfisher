@@ -42,6 +42,10 @@ struct Cli {
     /// that start later, each as its own robot.
     #[arg(long, conflicts_with_all = ["replay", "follow"])]
     follow_all: bool,
+    /// One instance per project: watch the Claude Code sessions running in this directory (or
+    /// --cwd), and nothing else. Finds a free port, so several can run side by side.
+    #[arg(long, conflicts_with_all = ["replay", "follow", "follow_all"])]
+    here: bool,
     /// Replay speed multiplier.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
@@ -83,9 +87,10 @@ struct Cli {
     /// the daemon runs. The watch listener then binds to localhost only, unless --phone is given too.
     #[arg(long)]
     tailscale: bool,
-    /// HTTPS port on the tailnet name.
-    #[arg(long, default_value_t = 443)]
-    tailscale_port: u16,
+    /// HTTPS port on the tailnet name. Defaults to 443 for the first instance and a port of its
+    /// own for any other, so several projects can be served at once.
+    #[arg(long)]
+    tailscale_port: Option<u16>,
     /// Extra arguments for claude, after `--`.
     #[arg(last = true)]
     claude_args: Vec<String>,
@@ -214,6 +219,38 @@ async fn main() -> Result<()> {
         Some(Command::UninstallHooks { yes }) => return install::run(false, 0, "", yes),
         None => {}
     }
+    let mut cli = cli;
+    let projects_root = dirs::home_dir()
+        .context("no home directory")?
+        .join(".claude/projects");
+    let here_dir = if cli.here {
+        let dir = std::fs::canonicalize(&cli.cwd)?;
+        let found = follow::project_dir(&projects_root, &dir).with_context(|| {
+            format!(
+                "no Claude Code sessions found for {}; start `claude` there first",
+                dir.display()
+            )
+        })?;
+        Some(found)
+    } else {
+        None
+    };
+    // Several projects, several instances: take the first free pair of ports from the one asked for.
+    if cli.here {
+        let mut port = cli.port;
+        while std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
+            || std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port + 1)).is_err()
+        {
+            port += 2;
+            anyhow::ensure!(port < cli.port + 60, "no free port near {}", cli.port);
+        }
+        cli.port = port;
+    }
+    let tailscale_port = cli.tailscale_port.unwrap_or(if cli.port == 7777 {
+        443
+    } else {
+        10_000 + cli.port
+    });
     let cwd = match cli.follow.as_deref().and_then(follow::cwd_of) {
         Some(followed) => followed,
         None => {
@@ -233,7 +270,7 @@ async fn main() -> Result<()> {
     let tailnet = if cli.tailscale {
         let name = tailnet_name()
             .context("--tailscale: no tailnet name; is Tailscale running and logged in?")?;
-        let port = match cli.tailscale_port {
+        let port = match tailscale_port {
             443 => String::new(),
             p => format!(":{p}"),
         };
@@ -274,6 +311,14 @@ async fn main() -> Result<()> {
             banter: banter.clone(),
         }),
     };
+    if let Some(dir) = here_dir.clone() {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            if let Err(e) = follow::run_project(dir, hub.clone()).await {
+                hub.notice(format!("watching stopped: {e:#}"));
+            }
+        });
+    }
     if cli.follow_all {
         let projects = dirs::home_dir()
             .context("no home directory")?
@@ -296,10 +341,9 @@ async fn main() -> Result<()> {
         });
     }
     let agent = match &launcher {
-        Some(l) if !cli.observe && cli.follow.is_none() && !cli.follow_all => Some(agent::start(
-            l.config(cwd.clone(), cli.resume.clone()),
-            hub.clone(),
-        )),
+        Some(l) if !cli.observe && cli.follow.is_none() && !cli.follow_all && !cli.here => Some(
+            agent::start(l.config(cwd.clone(), cli.resume.clone()), hub.clone()),
+        ),
         _ => None,
     };
     if cli.observe {
@@ -365,7 +409,7 @@ async fn main() -> Result<()> {
             println!("watch on this network (read-only): {url}");
         }
         if let Some(url) = &tailnet {
-            _serve = Some(tailscale_serve(cli.tailscale_port, phone_port)?);
+            _serve = Some(tailscale_serve(tailscale_port, phone_port)?);
             println!("watch from anywhere on your tailnet (read-only): {url}");
         }
         if let Some(url) = &phone_url

@@ -47,13 +47,38 @@ pub async fn run(path: PathBuf, hub: Arc<Hub>) -> Result<()> {
 /// Every session whose transcript was written to within `window`, each followed as it appears.
 /// Runs until the daemon stops; new sessions are picked up on the next scan.
 pub async fn run_all(projects: PathBuf, hub: Arc<Hub>, window: Duration) -> Result<()> {
-    let mut following = std::collections::HashSet::new();
     hub.notice(format!(
         "following every session active in the last {} minutes",
         window.as_secs() / 60
     ));
+    run_matching(projects, hub, window, None).await
+}
+
+/// One project's sessions only: the transcripts in that project's own folder.
+pub async fn run_project(dir: PathBuf, hub: Arc<Hub>) -> Result<()> {
+    let projects = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+    hub.notice(format!(
+        "watching this project's Claude Code sessions ({})",
+        dir.file_name()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    // Six hours back, so a session left open over lunch is still on the floor.
+    run_matching(projects, hub, Duration::from_secs(6 * 3600), Some(dir)).await
+}
+
+async fn run_matching(
+    projects: PathBuf,
+    hub: Arc<Hub>,
+    window: Duration,
+    only: Option<PathBuf>,
+) -> Result<()> {
+    let mut following = std::collections::HashSet::new();
     loop {
-        for path in active_transcripts(&projects, window) {
+        let found = active_transcripts(&projects, window)
+            .into_iter()
+            .filter(|p| only.as_deref().is_none_or(|d| p.parent() == Some(d)));
+        for path in found {
             if following.insert(path.clone()) {
                 let hub = hub.clone();
                 tokio::spawn(async move {
@@ -70,6 +95,41 @@ pub async fn run_all(projects: PathBuf, hub: Arc<Hub>, window: Duration) -> Resu
 
 /// `<projects>/<dir>/<session>.jsonl`, modified within `window`. Subagent transcripts live a
 /// level deeper and are left out; their work shows through the parent's Task calls.
+/// Claude Code keeps a project's transcripts in a folder named after its path, every character
+/// that is not a letter, digit or hyphen turned into a hyphen. If that guess misses, look for the
+/// folder whose newest transcript says it ran in `cwd`.
+pub fn project_dir(projects: &Path, cwd: &Path) -> Option<PathBuf> {
+    let encoded: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let guess = projects.join(&encoded);
+    if guess.is_dir() {
+        return Some(guess);
+    }
+    std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|d| d.path())
+        .find(|dir| {
+            let newest = std::fs::read_dir(dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
+                .max_by_key(|f| f.metadata().and_then(|m| m.modified()).ok());
+            newest.is_some_and(|f| cwd_of(&f.path()).as_deref() == Some(cwd))
+        })
+}
+
 pub fn active_transcripts(projects: &Path, window: Duration) -> Vec<PathBuf> {
     let now = std::time::SystemTime::now();
     let Ok(dirs) = std::fs::read_dir(projects) else {
@@ -145,6 +205,18 @@ async fn run_from(path: PathBuf, hub: Arc<Hub>, backlog: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_folders_are_found_by_their_encoded_path() {
+        let root = std::env::temp_dir().join(format!("kf-projects-{}", std::process::id()));
+        let dir = root.join("-Users-me-code-my-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            project_dir(&root, Path::new("/Users/me/code/my-app")),
+            Some(dir)
+        );
+        assert_eq!(project_dir(&root, Path::new("/Users/me/elsewhere")), None);
+    }
 
     #[test]
     fn tail_never_starts_mid_line() {

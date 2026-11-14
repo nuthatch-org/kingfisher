@@ -6,7 +6,8 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { Sparks } from './fx';
 import { City } from './city';
-import { KIND_COLOR, KIND_GLYPH } from './palette';
+import { KIND_COLOR, KIND_GLYPH, TEST_COMMAND } from './palette';
+import { diffLines } from './diff';
 import type { ToolKind } from './types';
 
 /*
@@ -14,7 +15,7 @@ import type { ToolKind } from './types';
  * what it is doing. Everything is procedural geometry and canvas textures, so there are no assets.
  */
 
-type StationId = 'shelf' | 'desk' | 'terminal' | 'cabinet' | 'window' | 'switchboard' | 'lounge' | 'door' | 'floor';
+type StationId = 'shelf' | 'desk' | 'terminal' | 'cabinet' | 'window' | 'switchboard' | 'lounge' | 'door' | 'floor' | 'testrig';
 
 interface Station {
   stand: THREE.Vector3;
@@ -31,7 +32,44 @@ const STATIONS: Record<StationId, Station> = {
   lounge: { stand: new THREE.Vector3(-10.2, 0, 6.3), look: new THREE.Vector3(-8, 0, 3) },
   door: { stand: new THREE.Vector3(9.5, 0, 7.4), look: new THREE.Vector3(9.5, 1, 10) },
   floor: { stand: new THREE.Vector3(0, 0, 4.4), look: new THREE.Vector3(0, 1, 0) },
+  testrig: { stand: new THREE.Vector3(6.2, 0, -1.6), look: new THREE.Vector3(7.8, 1, -1.6) },
 };
+
+/** Where a shell command belongs on the floor, by what it does. */
+function shellStation(cmd: string): StationId {
+  if (TEST_COMMAND.test(cmd)) return 'testrig';
+  if (/\bgit\s+(commit|push|tag)\b/.test(cmd)) return 'door';
+  if (/\b(gh|curl|wget|https?|ssh|scp|rsync)\b/.test(cmd)) return 'window';
+  if (/\b(cargo\s+(build|check|clippy|fmt|run)|pnpm|npm|yarn|make|yatr|vite|tsc|go\s+build)\b/.test(cmd)) return 'desk';
+  return 'terminal';
+}
+
+/** Test totals from cargo, pytest, go, jest or vitest output, summed over every summary line. */
+export function testCounts(text: string): { passed: number; failed: number } | null {
+  let passed = 0;
+  let failed = 0;
+  let seen = false;
+  for (const m of text.matchAll(/(\d+) passed/g)) {
+    passed += Number(m[1]);
+    seen = true;
+  }
+  for (const m of text.matchAll(/(\d+) failed/g)) {
+    failed += Number(m[1]);
+    seen = true;
+  }
+  return seen ? { passed, failed } : null;
+}
+
+/** The message of a `git commit`, from -m or the first line of a heredoc. */
+export function commitMessage(cmd: string): string | null {
+  const m = cmd.match(/-m\s+(["'])([\s\S]+?)\1/) ?? cmd.match(/<<-?\s*'?\w+'?\s*\n\s*([^\n]+)/);
+  if (!m) return null;
+  return (m[2] ?? m[1]).split('\n')[0].trim();
+}
+
+function esc(s: string): string {
+  return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
+}
 
 /** The warehouse floor and wall height. */
 const W = 30;
@@ -542,6 +580,23 @@ export class Workshop {
   private conveyor: THREE.Mesh[] = [];
   private crane: { bridge: THREE.Group; hoist: THREE.Group } | null = null;
   private fans: THREE.Group[] = [];
+
+  // What the agents have done, for the boards on the walls.
+  private stats = { reads: 0, edits: 0, adds: 0, dels: 0, commands: 0, passed: 0, failed: 0, commits: 0, turns: 0 };
+  private log: { glyph: string; text: string; ok: boolean | null }[] = [];
+  private todos: { content: string; status: string }[] = [];
+  private calls = new Map<string, ToolCallInfo>();
+  private scoreboard = new Screen(6, 1.9, 1024);
+  private workboard = new Screen(4.4, 2.8, 1024);
+  private rigScreen = new Screen(1.2, 0.7, 512);
+  private rigLamps: { green: THREE.MeshBasicMaterial; red: THREE.MeshBasicMaterial; amber: THREE.MeshBasicMaterial } | null = null;
+  private rig: { state: 'idle' | 'running' | 'ok' | 'fail'; t: number } = { state: 'idle', t: 0 };
+  private cards = new Map<string, { obj: CSS2DObject; body: HTMLElement; until: number }>();
+  private beacon!: THREE.Mesh;
+  private beaconAt: THREE.Vector3 | null = null;
+  private trail!: THREE.Line;
+  private trailPts: THREE.Vector3[] = [];
+  private shipments: { mesh: THREE.Mesh; label: CSS2DObject; t: number }[] = [];
   private leds!: THREE.InstancedMesh;
   private telescope = new THREE.Group();
   private drawer!: THREE.Mesh;
@@ -772,6 +827,78 @@ export class Workshop {
     this.buildLoadingBay();
     this.buildCrane();
     this.buildClutter(orange);
+    this.buildTestRig();
+    this.buildBoards();
+  }
+
+  /** A test chamber with pass and fail lamps and a readout of the last run's totals. */
+  private buildTestRig() {
+    const g = new THREE.Group();
+    g.position.set(7.8, 0, -1.6);
+    g.rotation.y = -Math.PI / 2;
+    this.scene.add(g);
+    this.box(1.6, 0.5, 1.4, this.mat('#2b2f3a', 0.4, 0.7), 0, 0.25, 0, g);
+    this.box(1.6, 0.15, 1.4, this.mat('#2b2f3a', 0.4, 0.7), 0, 2.45, 0, g);
+    for (const x of [-0.75, 0.75]) for (const z of [-0.65, 0.65]) this.box(0.1, 1.9, 0.1, this.mat('#3d4250', 0.4, 0.8), x, 1.45, z, g);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.9, 1.2), new THREE.MeshStandardMaterial({ color: '#9fd8ff', transparent: true, opacity: 0.12, roughness: 0.1, metalness: 0.1 }));
+    glass.position.y = 1.45;
+    g.add(glass);
+    this.box(0.5, 0.5, 0.5, this.mat('#a8794e', 0.85), 0, 0.75, 0, g);
+    const lamp = (color: string, y: number) => {
+      const m = new THREE.MeshBasicMaterial({ color });
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.12, 14, 10), m);
+      s.position.set(0.95, y, 0.55);
+      g.add(s);
+      return m;
+    };
+    this.rigLamps = { green: lamp('#1f5a2a', 2.2), amber: lamp('#5a4a1a', 1.9), red: lamp('#5a1f1f', 1.6) };
+    this.rigScreen.mesh.position.set(0, 2.85, 0.4);
+    g.add(this.rigScreen.mesh);
+    this.box(1.3, 0.8, 0.06, this.mat('#15171f'), 0, 2.85, 0.36, g);
+    this.rigScreen.lines('test rig', [{ text: 'waiting', color: '#7f8aa0' }]);
+  }
+
+  /** The scoreboard over the racks and the work board on the side wall, and the table's beacon. */
+  private buildBoards() {
+    this.box(6.3, 2.2, 0.12, this.mat('#15171f', 0.4, 0.3), -9.6, 6.1, -D / 2 + 0.75);
+    this.scoreboard.mesh.position.set(-9.6, 6.1, -D / 2 + 0.82);
+    this.scene.add(this.scoreboard.mesh);
+    const wb = new THREE.Group();
+    wb.position.set(-W / 2 + 0.12, 3.9, 1.4);
+    wb.rotation.y = Math.PI / 2;
+    this.scene.add(wb);
+    this.box(4.7, 3.1, 0.1, this.mat('#e8ecf2', 0.6, 0), 0, 0, -0.06, wb);
+    wb.add(this.workboard.mesh);
+    this.beacon = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.04, 0.12, 3, 10, 1, true),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color('#ffe27a').multiplyScalar(2.5), transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    this.scene.add(this.beacon);
+    this.trail = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#7ad7ff', transparent: true, opacity: 0.85 }));
+    this.scene.add(this.trail);
+    this.paintBoards();
+  }
+
+  private paintBoards() {
+    const s = this.stats;
+    this.scoreboard.lines('THIS SESSION', [
+      { text: `read ${s.reads}   edited ${s.edits}  (+${s.adds} −${s.dels})`, color: '#cfe6f0' },
+      { text: `commands ${s.commands}   turns ${s.turns}`, color: '#cfe6f0' },
+      { text: `tests ✓ ${s.passed}   ✗ ${s.failed}`, color: s.failed ? '#ff9a9a' : '#9dff8a' },
+      { text: `commits ${s.commits}`, color: '#ffd27a' },
+    ], '#05070c');
+    const lines: { text: string; color?: string }[] = [];
+    if (this.todos.length) {
+      for (const t of this.todos.slice(0, 7)) {
+        const mark = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▶' : '○';
+        lines.push({ text: `${mark} ${t.content}`, color: t.status === 'completed' ? '#7f8aa0' : t.status === 'in_progress' ? '#ffd27a' : '#cfe6f0' });
+      }
+      lines.push({ text: '', color: '#000' });
+    }
+    for (const l of this.log.slice(-(this.todos.length ? 3 : 9))) {
+      lines.push({ text: `${l.glyph} ${l.text}`, color: l.ok === false ? '#ff9a9a' : l.ok ? '#cfe6f0' : '#7f8aa0' });
+    }
+    this.workboard.lines(this.todos.length ? 'JOB BOARD' : 'WORK LOG', lines, '#0a1420');
   }
 
   /** Pallet racks of crates, where robots go to read: a crate comes down carrying the file. */
@@ -1205,6 +1332,9 @@ export class Workshop {
   }
 
   turnStarted(session: string | null, prompt: string, live: boolean) {
+    this.stats.turns++;
+    this.trailPts = [];
+    this.paintBoards();
     const r = this.robotFor(session, null);
     r.idle = false;
     r.goTo('floor');
@@ -1228,6 +1358,8 @@ export class Workshop {
   }
 
   toolCall(info: ToolCallInfo, live: boolean) {
+    this.calls.set(info.callId, info);
+    this.trackTodos(info);
     const paths = info.paths.map((p) => this.rel(p)).filter((p): p is string => p !== null);
     const file: string | null = paths[0] ?? null;
     if (file && info.kind === 'write' && this.city.addFile(file)) this.hooks.files(this.city.count);
@@ -1241,7 +1373,7 @@ export class Workshop {
     r.queue.push({
       callId: info.callId,
       kind: info.kind,
-      station: KIND_STATION[info.kind],
+      station: info.kind === 'shell' ? shellStation(String(info.input?.command ?? '')) : KIND_STATION[info.kind],
       label: `${KIND_GLYPH[info.kind]} ${VERB[info.kind]} ${info.label}`.trim(),
       file,
       input: info.input,
@@ -1260,6 +1392,7 @@ export class Workshop {
       helper.goTo('door');
       helper.setAction(ok ? 'done, heading out' : 'gave up');
     }
+    this.tally(callId, ok, summary);
     if (!live) return;
     const r = this.robotFor(session, parent);
     const task = r.current?.callId === callId ? r.current : r.queue.find((t) => t.callId === callId);
@@ -1325,11 +1458,147 @@ export class Workshop {
     this.flying = [];
     for (const b of this.beams) b.mesh.removeFromParent();
     this.beams = [];
+    for (const c of this.cards.values()) {
+      c.obj.element.remove();
+      c.obj.removeFromParent();
+    }
+    this.cards.clear();
+    this.stats = { reads: 0, edits: 0, adds: 0, dels: 0, commands: 0, passed: 0, failed: 0, commits: 0, turns: 0 };
+    this.log = [];
+    this.todos = [];
+    this.trailPts = [];
+    this.trail.geometry.setFromPoints([]);
+    this.beaconAt = null;
+    this.paintBoards();
     this.city.resetActivity();
     this.waiting = false;
     this.placeholder();
     this.deskScreen.idle('editor · idle');
     this.termScreen.lines('zsh', [{ text: '$ _', color: '#9dff8a' }]);
+  }
+
+  // ---------------------------------------------------------------- the record of work
+
+  private trackTodos(info: ToolCallInfo) {
+    const input = info.input ?? {};
+    if (info.tool === 'TodoWrite' && Array.isArray(input.todos)) {
+      this.todos = input.todos.map((t: any) => ({ content: String(t.content ?? t.subject ?? ''), status: String(t.status ?? 'pending') }));
+    } else if (info.tool === 'TaskCreate' && (input.subject || input.description)) {
+      this.todos.push({ content: String(input.subject ?? input.description), status: 'pending' });
+    } else if (info.tool === 'TaskUpdate' && input.status) {
+      const key = String(input.subject ?? input.taskId ?? '');
+      const t = this.todos.find((x, i) => x.content === key || String(i + 1) === key);
+      if (t) t.status = String(input.status);
+    } else {
+      return;
+    }
+    this.paintBoards();
+  }
+
+  private tally(callId: string, ok: boolean, summary: string) {
+    const info = this.calls.get(callId);
+    if (!info) return;
+    const s = this.stats;
+    const cmd = String(info.input?.command ?? '');
+    switch (info.kind) {
+      case 'read':
+        s.reads++;
+        break;
+      case 'edit':
+      case 'write': {
+        if (!ok) break;
+        s.edits++;
+        const before = typeof info.input?.old_string === 'string' ? info.input.old_string : '';
+        const after = typeof info.input?.new_string === 'string' ? info.input.new_string : typeof info.input?.content === 'string' ? info.input.content : '';
+        if (!before) s.adds += after ? after.split('\n').length : 0;
+        else for (const l of diffLines(before, after)) l.op === '+' ? s.adds++ : l.op === '-' ? s.dels++ : 0;
+        break;
+      }
+      case 'shell': {
+        s.commands++;
+        const counts = TEST_COMMAND.test(cmd) ? testCounts(summary) : null;
+        if (counts) {
+          s.passed += counts.passed;
+          s.failed += counts.failed;
+        }
+        if (ok && /\bgit\s+commit\b/.test(cmd)) s.commits++;
+        break;
+      }
+    }
+    this.log.push({ glyph: KIND_GLYPH[info.kind], text: `${info.tool} ${info.label}`.slice(0, 60), ok });
+    if (this.log.length > 30) this.log.shift();
+    this.paintBoards();
+  }
+
+  /** An HTML card at the machine, showing exactly what the robot is doing there. */
+  private openCard(r: Robot, t: Task) {
+    const st = STATIONS[t.station as StationId] ?? STATIONS.floor;
+    const el = document.createElement('div');
+    el.className = 'work-card';
+    el.style.setProperty('--kind', KIND_COLOR[t.kind]);
+    const head = document.createElement('div');
+    head.className = 'wc-head';
+    const body = document.createElement('div');
+    body.className = 'wc-body';
+    el.append(head, body);
+    const input = t.input ?? {};
+    if (t.kind === 'edit' || t.kind === 'write') {
+      const before = typeof input.old_string === 'string' ? input.old_string : '';
+      const after = typeof input.new_string === 'string' ? input.new_string : typeof input.content === 'string' ? input.content : '';
+      const lines: { op: ' ' | '-' | '+'; text: string }[] = before ? diffLines(before, after) : after.split('\n').map((text: string) => ({ op: '+' as const, text }));
+      const adds = lines.filter((l) => l.op === '+').length;
+      const dels = lines.filter((l) => l.op === '-').length;
+      head.innerHTML = `${KIND_GLYPH[t.kind]} <b>${esc(t.file ?? 'file')}</b> <span class="add">+${adds}</span> <span class="del">−${dels}</span>`;
+      body.innerHTML = lines
+        .filter((l) => l.op !== ' ')
+        .slice(0, 10)
+        .map((l) => `<div class="${l.op === '+' ? 'add' : 'del'}">${l.op} ${esc(l.text)}</div>`)
+        .join('');
+    } else if (t.kind === 'shell') {
+      head.innerHTML = `❯ <b>${esc(String(input.command ?? '').split('\n')[0].slice(0, 90))}</b>`;
+      body.innerHTML = `<div class="dim">running…</div>`;
+    } else {
+      head.innerHTML = `${KIND_GLYPH[t.kind]} <b>${esc(t.label.replace(/^\S+\s/, ''))}</b>`;
+      body.innerHTML = `<div class="dim">…</div>`;
+    }
+    const obj = new CSS2DObject(el);
+    // High enough to clear the robot's own name tag in front of the machine.
+    obj.position.copy(st.look).add(new THREE.Vector3(0, 3.4, 0));
+    this.scene.add(obj);
+    this.cards.set(t.callId, { obj, body, until: Infinity });
+    while (this.cards.size > 3) {
+      const [k, c] = this.cards.entries().next().value!;
+      c.obj.element.remove();
+      c.obj.removeFromParent();
+      this.cards.delete(k);
+    }
+  }
+
+  private fillCard(t: Task) {
+    const card = this.cards.get(t.callId);
+    if (!card) return;
+    card.until = performance.now() + 4000;
+    card.obj.element.classList.toggle('failed', t.ok === false);
+    if (t.kind === 'edit' || t.kind === 'write') return;
+    let lines = t.summary.split('\n').filter((l) => l.trim());
+    lines = t.kind === 'shell' ? lines.slice(-8) : lines.slice(0, 8);
+    const counts = t.kind === 'shell' && TEST_COMMAND.test(String(t.input?.command ?? '')) ? testCounts(t.summary) : null;
+    const head = counts ? `<div class="${counts.failed ? 'del' : 'add'}">tests: ${counts.passed} passed, ${counts.failed} failed</div>` : '';
+    card.body.innerHTML = head + (lines.length ? lines.map((l) => `<div>${esc(l.replace(/^\s*\d+\t/, '').slice(0, 110))}</div>`).join('') : `<div class="dim">${t.ok ? 'done' : 'failed'}</div>`);
+  }
+
+  private ship(message: string) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 0.8), new THREE.MeshStandardMaterial({ color: '#c8925a', emissive: '#ffd27a', emissiveIntensity: 0.4 }));
+    mesh.position.set(9.5, 0.3, 6.8);
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    const el = document.createElement('div');
+    el.className = 'book-label ship';
+    el.textContent = `📦 ${message}`;
+    const label = new CSS2DObject(el);
+    label.position.set(0, 0.7, 0);
+    mesh.add(label);
+    this.shipments.push({ mesh, label, t: 0 });
   }
 
   // ---------------------------------------------------------------- task lifecycle
@@ -1362,6 +1631,15 @@ export class Workshop {
         this.busy.terminal = 1;
         const cmd = typeof t.input?.command === 'string' ? t.input.command : '';
         this.termScreen.lines('zsh', [{ text: `$ ${cmd.split('\n')[0]}`, color: '#9dff8a' }, { text: '…', color: '#7f8aa0' }]);
+        if (t.station === 'testrig') {
+          this.rig = { state: 'running', t: 0 };
+          this.rigScreen.lines('test rig', [{ text: 'running…', color: '#ffd27a' }, { text: cmd.split('\n')[0].slice(0, 40), color: '#7f8aa0' }]);
+        } else if (t.station === 'desk') {
+          this.busy.desk = 1;
+          this.deskScreen.lines('build', [{ text: `$ ${cmd.split('\n')[0]}`, color: '#9dff8a' }]);
+        } else if (t.station === 'window') {
+          this.busy.window = 1;
+        }
         break;
       }
       case 'search':
@@ -1378,10 +1656,32 @@ export class Workshop {
         break;
     }
     this.markFiles(r, t);
+    this.openCard(r, t);
+    if (t.file) {
+      const roof = this.city.roof(t.file);
+      if (roof) {
+        this.beaconAt = roof;
+        this.trailPts.push(roof.clone().add(new THREE.Vector3(0, 0.05, 0)));
+        if (this.trailPts.length > 14) this.trailPts.shift();
+        this.trail.geometry.setFromPoints(this.trailPts);
+      }
+    }
     this.sparks.burst(r.pos.clone().setY(1.1), color, 14, 2.5, 0.8, 0.22);
   }
 
   private finish(r: Robot, t: Task) {
+    this.fillCard(t);
+    if (t.kind === 'shell' && t.station === 'testrig') {
+      const counts = testCounts(t.summary);
+      this.rig = { state: t.ok && !(counts && counts.failed) ? 'ok' : 'fail', t: 0 };
+      this.rigScreen.lines(t.ok ? 'tests passed' : 'tests failed', counts
+        ? [{ text: `✓ ${counts.passed} passed`, color: '#9dff8a' }, { text: `✗ ${counts.failed} failed`, color: counts.failed ? '#ff9a9a' : '#7f8aa0' }]
+        : [{ text: t.ok ? 'ok' : 'failed', color: t.ok ? '#9dff8a' : '#ff9a9a' }], t.ok ? '#04121a' : '#1e0606');
+    }
+    if (t.kind === 'shell' && t.ok && t.station === 'door') {
+      const msg = commitMessage(String(t.input?.command ?? ''));
+      if (msg || /\bgit\s+push\b/.test(String(t.input?.command ?? ''))) this.ship(msg ?? 'pushed');
+    }
     if (t.kind === 'shell') {
       const cmd = typeof t.input?.command === 'string' ? t.input.command.split('\n')[0] : '';
       const out = t.summary.split('\n').filter((l) => l.trim()).slice(-7);
@@ -1501,6 +1801,41 @@ export class Workshop {
     });
 
     this.city.frame(dt);
+
+    // Cards fade after their result has been shown for a while.
+    const nowMs = performance.now();
+    for (const [k, c] of this.cards) {
+      if (nowMs > c.until) {
+        c.obj.element.remove();
+        c.obj.removeFromParent();
+        this.cards.delete(k);
+      }
+    }
+    // The beacon stands over the file being worked on; it fades once nothing is.
+    const bm = this.beacon.material as THREE.MeshBasicMaterial;
+    const fileWork = [...this.robots.values()].some((r) => r.current?.file && !r.current.done);
+    if (this.beaconAt && fileWork) {
+      this.beacon.position.copy(this.beaconAt).add(new THREE.Vector3(0, 1.5, 0));
+      bm.opacity = Math.min(0.8, bm.opacity + dt * 2);
+    } else {
+      bm.opacity = Math.max(0, bm.opacity - dt);
+    }
+    // The test rig's lamps, and shipments rolling out of the loading bay.
+    if (this.rigLamps) {
+      this.rig.t += dt;
+      const blink = Math.sin(this.rig.t * 10) > 0;
+      this.rigLamps.amber.color.set(this.rig.state === 'running' && blink ? '#ffcc33' : '#5a4a1a').multiplyScalar(this.rig.state === 'running' && blink ? 2.5 : 1);
+      this.rigLamps.green.color.set(this.rig.state === 'ok' ? '#3dff7a' : '#1f5a2a').multiplyScalar(this.rig.state === 'ok' ? 2.5 : 1);
+      this.rigLamps.red.color.set(this.rig.state === 'fail' && blink ? '#ff3030' : '#5a1f1f').multiplyScalar(this.rig.state === 'fail' && blink ? 2.5 : 1);
+    }
+    this.shipments = this.shipments.filter((sh) => {
+      sh.t += dt;
+      sh.mesh.position.z = 6.8 + Math.max(0, sh.t - 1.5) * 1.6;
+      if (sh.t < 6) return true;
+      sh.label.element.remove();
+      sh.mesh.removeFromParent();
+      return false;
+    });
     const up = new THREE.Vector3(0, 1, 0);
     this.beams = this.beams.filter((b) => {
       b.life -= dt;
