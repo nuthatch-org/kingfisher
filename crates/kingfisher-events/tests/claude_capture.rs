@@ -182,6 +182,18 @@ fn aborted_turn_has_no_cost_rather_than_zero() {
 }
 
 #[test]
+fn a_subagent_transcript_yields_only_its_work() {
+    let mut n = ClaudeNormalizer::for_subagent();
+    let lines = [
+        r#"{"type":"user","isSidechain":true,"sessionId":"s","cwd":"/r","message":{"content":"Review store.rs"}}"#,
+        r#"{"type":"assistant","isSidechain":true,"sessionId":"s","cwd":"/r","message":{"content":[{"type":"tool_use","id":"t9","name":"Read","input":{"file_path":"/r/src/store.rs"}}]}}"#,
+        r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+    ];
+    let bodies: Vec<EventBody> = lines.iter().flat_map(|l| n.line(l).bodies).collect();
+    assert!(matches!(&bodies[..], [EventBody::ToolCall { tool, .. }] if tool == "Read"));
+}
+
+#[test]
 fn a_session_transcript_reads_like_the_stream() {
     let mut n = ClaudeNormalizer::for_transcript();
     let lines = [

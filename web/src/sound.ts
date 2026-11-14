@@ -10,8 +10,20 @@ export class Sonifier {
   private pad: { gain: GainNode; filter: BiquadFilterNode } | null = null;
   private padLevel = 0;
   enabled = false;
+  /** Wanted on, but the browser has not had a click yet, so audio cannot start. */
+  wanted = false;
+
+  /** Call from any click or key press: browsers only let audio start after one. */
+  unlock() {
+    if (this.wanted && !this.enabled) {
+      this.enabled = true;
+      if (!this.ctx) this.boot();
+      void this.ctx?.resume();
+    }
+  }
 
   toggle(): boolean {
+    this.wanted = !this.enabled;
     this.enabled = !this.enabled;
     if (this.enabled && !this.ctx) this.boot();
     if (this.ctx) {

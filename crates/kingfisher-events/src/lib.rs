@@ -183,6 +183,8 @@ pub struct ClaudeNormalizer {
     tools_by_call: HashMap<String, String>,
     /// Reading a session's own transcript file rather than a stream-json pipe.
     transcript: bool,
+    /// A subagent's transcript: its work belongs to the helper, not to the session's own turns.
+    subagent: bool,
     announced: bool,
 }
 
@@ -197,6 +199,17 @@ impl ClaudeNormalizer {
     pub fn for_transcript() -> Self {
         Self {
             transcript: true,
+            ..Self::default()
+        }
+    }
+
+    /// For `<session>/subagents/agent-*.jsonl`: tool calls and replies only, since the helper's
+    /// brief and ending are already on the parent's Agent call.
+    pub fn for_subagent() -> Self {
+        Self {
+            transcript: true,
+            subagent: true,
+            announced: true,
             ..Self::default()
         }
     }
@@ -259,6 +272,8 @@ impl ClaudeNormalizer {
         }
         match kind {
             "assistant" => bodies.extend(self.assistant(v)),
+            "user" if self.subagent && v["message"]["content"].is_string() => {}
+            "system" if self.subagent => {}
             "user" => {
                 if let Some(text) = v["message"]["content"].as_str() {
                     // Task notifications and messages from other sessions also arrive as user turns.

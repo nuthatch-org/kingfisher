@@ -225,6 +225,8 @@ export class Robot {
   private blink = 0;
   bubbleUntil = 0;
   onTag?: () => void;
+  /** Seconds, on the frame clock: when this robot last had something to do. */
+  lastActive = performance.now() / 1000;
   setFocused(on: boolean) {
     this.tag.classList.toggle('focused', on);
   }
@@ -1390,7 +1392,8 @@ export class Workshop {
 
   toolResult(session: string | null, parent: string | null, callId: string, ok: boolean, summary: string, test: boolean, live: boolean) {
     const helper = this.robots.get(callId);
-    if (helper) {
+    // A background helper's call returns at once with "launched"; it is still working.
+    if (helper && !summary.startsWith('Async agent launched')) {
       helper.leaving = true;
       helper.goTo('door');
       helper.setAction(ok ? 'done, heading out' : 'gave up');
@@ -1851,6 +1854,13 @@ export class Workshop {
       else if (performance.now() > r.nextMuse && !r.bubbleUntil) {
         r.say(this.musing(), 'note', 9);
         r.nextMuse = performance.now() + 25000 + Math.random() * 20000;
+      }
+      if (r.current || r.queue.length || r.thinking > 0.05 || r.speaking > 0.05) r.lastActive = now;
+      // Background helpers never get a closing result: they leave once they have gone quiet.
+      if (r.scale < 1 && !r.leaving && now - r.lastActive > 30) {
+        r.leaving = true;
+        r.goTo('door');
+        r.setAction('done, heading out');
       }
       r.update(dt, this.sparks);
       if (r.gone) {

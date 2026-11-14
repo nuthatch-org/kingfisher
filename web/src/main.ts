@@ -122,11 +122,47 @@ class App {
     $('drawer-close').addEventListener('click', () => $('drawer').classList.remove('open'));
     $('auto').addEventListener('click', () => this.link.send({ type: 'set_mode', autonomous: !this.autonomous }));
     $('banter').addEventListener('click', () => this.link.send({ type: 'set_mode', banter: !this.banter }));
-    $('sound').addEventListener('click', () => {
-      const on = this.sound.toggle();
-      $('sound').textContent = on ? 'sound on' : 'sound off';
-      $('sound').className = on ? 'chip ok' : 'chip dim';
+    const soundChip = () => {
+      const s = this.sound;
+      $('sound').textContent = s.enabled ? 'sound on' : s.wanted ? 'sound: click anywhere' : 'sound off';
+      $('sound').className = s.enabled ? 'chip ok' : s.wanted ? 'chip warn' : 'chip dim';
+      try {
+        localStorage.setItem('kf-sound', s.wanted || s.enabled ? 'on' : 'off');
+      } catch {
+        /* the preference just will not stick */
+      }
+    };
+    // On unless switched off before; audio itself waits for the first click or key.
+    try {
+      this.sound.wanted = localStorage.getItem('kf-sound') !== 'off';
+    } catch {
+      this.sound.wanted = true;
+    }
+    const unlock = (e: Event) => {
+      // The chip's own click toggles; unlocking on its press as well would undo it.
+      if ((e.target as HTMLElement | null)?.id === 'sound') return;
+      this.sound.unlock();
+      soundChip();
+    };
+    document.addEventListener('pointerdown', unlock, { once: false, capture: true });
+    document.addEventListener('keydown', unlock, { capture: true });
+    $('sound').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.sound.toggle();
+      soundChip();
     });
+    soundChip();
+    $('notify').addEventListener('click', async () => {
+      if (!('Notification' in window)) return;
+      const p = await Notification.requestPermission();
+      $('notify').textContent = p === 'granted' ? 'alerts on' : 'alerts blocked';
+      $('notify').className = p === 'granted' ? 'chip ok' : 'chip warn';
+    });
+    if ('Notification' in window && Notification.permission === 'granted') {
+      $('notify').textContent = 'alerts on';
+      $('notify').className = 'chip ok';
+    }
+    window.addEventListener('focus', () => this.calm());
   }
 
   private submit() {
@@ -394,6 +430,8 @@ class App {
         this.notice(b.text);
         break;
       case 'status':
+        if (e.session) this.attention(e.session, b.status, live);
+        break;
       case 'hook':
       case 'unknown':
         break;
@@ -508,6 +546,63 @@ class App {
     $('perms').append(card);
     this.perms.set(reqId, card);
     this.scene.setWaiting(session, tool, true);
+  }
+
+  // ---------------------------------------------------------------- attention
+
+  private states = new Map<string, string>();
+  private nagTimer: number | null = null;
+  private baseTitle = document.title;
+
+  /**
+   * A terminal's registry status changed. `waiting: …` means a prompt is up and needs its person;
+   * `idle` after `busy` means the turn is done. Both make a noise, flash the tab and, when the tab
+   * is hidden, raise a desktop notification.
+   */
+  private attention(session: string, status: string, live: boolean) {
+    const before = this.states.get(session);
+    this.states.set(session, status);
+    const name = (this.sessionCwd.get(session) ?? '').split('/').pop() || 'agent';
+    const waiting = status.startsWith('waiting');
+    this.scene.setWaiting(session, waiting ? status.replace(/^waiting:\s*/, '') : null, waiting);
+    if (!live) return;
+    if (waiting && !before?.startsWith('waiting')) {
+      this.notice(`${name} is waiting for you (${status.replace(/^waiting:\s*/, '')})`, 'warn');
+      this.alert(`${name} needs you`, 'approve or answer in its terminal', 'approval');
+    } else if (status === 'idle' && before && before !== 'idle') {
+      this.alert(`${name}: your turn`, 'the agent has finished and is waiting for your next message', 'turn');
+    } else if (status === 'busy') {
+      this.calm();
+    }
+    if (![...this.states.values()].some((s) => s.startsWith('waiting'))) this.stopNag();
+  }
+
+  private alert(title: string, body: string, kind: 'approval' | 'turn') {
+    if (kind === 'approval') {
+      this.sound.permission();
+      this.stopNag();
+      // Keep asking, quietly, until someone answers.
+      this.nagTimer = window.setInterval(() => this.sound.permission(), 20000);
+    } else {
+      this.sound.yourTurn();
+    }
+    document.title = `● ${title} · ${this.baseTitle}`;
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(title, { body, tag: 'kingfisher', renotify: true } as NotificationOptions);
+      } catch {
+        /* some browsers refuse notifications from plain http pages */
+      }
+    }
+  }
+
+  private calm() {
+    document.title = this.baseTitle;
+  }
+
+  private stopNag() {
+    if (this.nagTimer !== null) window.clearInterval(this.nagTimer);
+    this.nagTimer = null;
   }
 
   /** Sessions seen only through hooks: kingfisher can watch and approve them, not steer them. */

@@ -63,6 +63,35 @@ struct OpenSession {
     #[serde(rename = "sessionId")]
     session_id: String,
     cwd: PathBuf,
+    /// `busy`, `idle` (finished, waiting for the next message) or `waiting` (a permission
+    /// prompt or a question is up), with `waitingFor` saying which.
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(rename = "waitingFor", default)]
+    waiting_for: Option<serde_json::Value>,
+}
+
+impl OpenSession {
+    /// One word for the page: `busy`, `idle`, or `waiting: <what>`.
+    fn state(&self) -> String {
+        match self.status.as_deref() {
+            Some("waiting") => {
+                let what = match &self.waiting_for {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(v) => v
+                        .get("type")
+                        .or_else(|| v.get("kind"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("you")
+                        .to_owned(),
+                    None => "you".into(),
+                };
+                format!("waiting: {what}")
+            }
+            Some(s) => s.to_owned(),
+            None => "busy".into(),
+        }
+    }
 }
 
 fn alive(pid: i32) -> bool {
@@ -72,17 +101,22 @@ fn alive(pid: i32) -> bool {
 /// Session ids of the Claude Code terminals open in `cwd` right now, or `None` when this
 /// Claude Code keeps no registry to ask.
 pub fn open_sessions(registry: &Path, cwd: &Path) -> Option<Vec<String>> {
+    session_states(registry, cwd).map(|v| v.into_iter().map(|(id, _)| id).collect())
+}
+
+/// The open sessions in `cwd` with their current state, as `open_sessions` but with the status.
+pub fn session_states(registry: &Path, cwd: &Path) -> Option<Vec<(String, String)>> {
     let entries = std::fs::read_dir(registry).ok()?;
-    let mut ids: Vec<String> = entries
+    let mut out: Vec<(String, String)> = entries
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_slice::<OpenSession>(&std::fs::read(e.path()).ok()?).ok())
         .filter(|s| s.cwd == cwd && alive(s.pid))
-        .map(|s| s.session_id)
+        .map(|s| (s.session_id.clone(), s.state()))
         .collect();
-    ids.sort();
-    ids.dedup();
-    Some(ids)
+    out.sort();
+    out.dedup_by(|a, b| a.0 == b.0);
+    Some(out)
 }
 
 /// One project, one terminal or more: follow exactly the sessions open in `cwd`, add ones that
@@ -103,8 +137,23 @@ pub async fn run_project(
         return run_matching(projects, hub, Duration::from_secs(10 * 60), Some(dir)).await;
     }
     let mut following: std::collections::HashMap<String, JoinHandle<()>> = Default::default();
+    let mut states: std::collections::HashMap<String, String> = Default::default();
     loop {
-        let open = open_sessions(&registry, &cwd).unwrap_or_default();
+        let current = session_states(&registry, &cwd).unwrap_or_default();
+        // Status changes are how the page knows a terminal is waiting on its person.
+        for (id, state) in &current {
+            if states.get(id) != Some(state) {
+                states.insert(id.clone(), state.clone());
+                hub.publish(
+                    Some(id.clone()),
+                    None,
+                    EventBody::Status {
+                        status: state.clone(),
+                    },
+                );
+            }
+        }
+        let open: Vec<String> = current.into_iter().map(|(id, _)| id).collect();
         for id in &open {
             let path = dir.join(format!("{id}.jsonl"));
             if following.contains_key(id) || !path.exists() {
@@ -127,6 +176,7 @@ pub async fn run_project(
             if let Some(task) = following.remove(&id) {
                 task.abort();
             }
+            states.remove(&id);
             hub.publish(
                 Some(id),
                 None,
@@ -135,7 +185,7 @@ pub async fn run_project(
                 },
             );
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
@@ -228,16 +278,85 @@ pub fn active_transcripts(projects: &Path, window: Duration) -> Vec<PathBuf> {
     out
 }
 
-async fn run_from(path: PathBuf, hub: Arc<Hub>, backlog: u64) -> Result<()> {
-    let mut f =
-        std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let len = f.metadata()?.len();
-    let mut normalizer = ClaudeNormalizer::for_transcript();
-    let start = len.saturating_sub(backlog);
-    f.seek(SeekFrom::Start(start))?;
+/// One transcript being read from where it was opened onwards.
+struct Tail {
+    file: std::fs::File,
     // Bytes, not text: a read can end inside a multi-byte character as well as inside a line.
-    let mut pending: Vec<u8> = Vec::new();
-    let mut skip_fragment = start > 0;
+    pending: Vec<u8>,
+    skip_fragment: bool,
+    normalizer: ClaudeNormalizer,
+    /// For a subagent's transcript, the parent's Agent call, so its work goes to the helper robot.
+    parent: Option<String>,
+}
+
+impl Tail {
+    fn open(
+        path: &Path,
+        backlog: u64,
+        normalizer: ClaudeNormalizer,
+        parent: Option<String>,
+    ) -> Result<Self> {
+        let mut file =
+            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let len = file.metadata()?.len();
+        let start = len.saturating_sub(backlog);
+        file.seek(SeekFrom::Start(start))?;
+        Ok(Self {
+            file,
+            pending: Vec::new(),
+            skip_fragment: start > 0,
+            normalizer,
+            parent,
+        })
+    }
+
+    fn poll(&mut self, hub: &Hub) -> Result<()> {
+        let mut buf = Vec::new();
+        self.file.read_to_end(&mut buf)?;
+        self.pending.extend_from_slice(&buf);
+        // Only whole lines; the writer may be mid-line when we read.
+        while let Some(i) = self.pending.iter().position(|&c| c == b'\n') {
+            let raw: Vec<u8> = self.pending.drain(..=i).collect();
+            if std::mem::take(&mut self.skip_fragment) {
+                continue;
+            }
+            let line = String::from_utf8_lossy(&raw);
+            let out = self.normalizer.line(line.trim_end());
+            let parent = self.parent.clone().or(out.parent);
+            for body in out.bodies {
+                // Lets the page fetch this session's own file list for its city.
+                if let (EventBody::SessionStarted { cwd, .. }, Some(id)) = (&body, &out.session) {
+                    hub.note_session(id, PathBuf::from(cwd), false);
+                }
+                hub.publish(out.session.clone(), parent.clone(), body);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `<session>/subagents/agent-<id>.jsonl` beside a `.meta.json` whose `toolUseId` names the
+/// parent's Agent call. Files whose meta has not been written yet are left for the next scan.
+fn subagents(dir: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|p| {
+            let meta: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(p.with_extension("meta.json")).ok()?).ok()?;
+            Some((p, meta["toolUseId"].as_str()?.to_owned()))
+        })
+        .collect()
+}
+
+async fn run_from(path: PathBuf, hub: Arc<Hub>, backlog: u64) -> Result<()> {
+    let mut main = Tail::open(&path, backlog, ClaudeNormalizer::for_transcript(), None)?;
+    let sub_dir = path.with_extension("").join("subagents");
+    let mut subs: std::collections::HashMap<PathBuf, Tail> = Default::default();
     hub.notice(format!(
         "following {}",
         path.parent()
@@ -245,38 +364,71 @@ async fn run_from(path: PathBuf, hub: Arc<Hub>, backlog: u64) -> Result<()> {
             .map(|d| d.to_string_lossy().into_owned())
             .unwrap_or_default()
     ));
-
-    loop {
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        if !buf.is_empty() {
-            pending.extend_from_slice(&buf);
-            // Only whole lines; the writer may be mid-line when we read.
-            while let Some(i) = pending.iter().position(|&c| c == b'\n') {
-                let raw: Vec<u8> = pending.drain(..=i).collect();
-                if skip_fragment {
-                    skip_fragment = false;
+    for tick in 0u64.. {
+        main.poll(&hub)?;
+        if tick % 6 == 0 {
+            for (file, tool_use) in subagents(&sub_dir) {
+                if subs.contains_key(&file) {
                     continue;
                 }
-                let line = String::from_utf8_lossy(&raw);
-                let out = normalizer.line(line.trim_end());
-                for body in out.bodies {
-                    // Lets the page fetch this session's own file list for its city.
-                    if let (EventBody::SessionStarted { cwd, .. }, Some(id)) = (&body, &out.session)
-                    {
-                        hub.note_session(id, PathBuf::from(cwd), false);
-                    }
-                    hub.publish(out.session.clone(), out.parent.clone(), body);
+                // A helper that finished before we started is history; only recent ones walk in.
+                let fresh = file
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age < Duration::from_secs(600));
+                if !fresh {
+                    subs.insert(
+                        file.clone(),
+                        Tail::open(&file, 0, ClaudeNormalizer::for_subagent(), Some(tool_use))?,
+                    );
+                    continue;
                 }
+                match Tail::open(
+                    &file,
+                    300_000,
+                    ClaudeNormalizer::for_subagent(),
+                    Some(tool_use),
+                ) {
+                    Ok(t) => {
+                        subs.insert(file, t);
+                    }
+                    Err(e) => tracing::warn!("subagent transcript: {e:#}"),
+                }
+            }
+        }
+        for t in subs.values_mut() {
+            if let Err(e) = t.poll(&hub) {
+                tracing::warn!("subagent transcript: {e:#}");
             }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_files_are_paired_with_the_call_that_started_them() {
+        let dir = std::env::temp_dir().join(format!("kf-subagents-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("agent-a1.jsonl"), "").unwrap();
+        std::fs::write(
+            dir.join("agent-a1.meta.json"),
+            r#"{"toolUseId":"toolu_X","description":"review"}"#,
+        )
+        .unwrap();
+        // Meta not written yet: wait for the next scan rather than guess.
+        std::fs::write(dir.join("agent-a2.jsonl"), "").unwrap();
+        assert_eq!(
+            subagents(&dir),
+            vec![(dir.join("agent-a1.jsonl"), "toolu_X".to_string())]
+        );
+    }
 
     #[test]
     fn only_live_sessions_in_this_folder_count_as_open() {
@@ -303,6 +455,11 @@ mod tests {
         assert_eq!(
             open_sessions(&reg, Path::new("/p/app")),
             Some(vec!["open-here".to_string()])
+        );
+        std::fs::write(reg.join("a.json"), format!(r#"{{"pid":{me},"sessionId":"open-here","cwd":"/p/app","status":"waiting","waitingFor":"permission"}}"#)).unwrap();
+        assert_eq!(
+            session_states(&reg, Path::new("/p/app")),
+            Some(vec![("open-here".into(), "waiting: permission".into())])
         );
         assert_eq!(
             open_sessions(&reg.join("missing"), Path::new("/p/app")),
