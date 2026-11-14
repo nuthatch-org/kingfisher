@@ -22,16 +22,21 @@ interface Station {
 }
 
 const STATIONS: Record<StationId, Station> = {
-  shelf: { stand: new THREE.Vector3(-4, 0, -4.4), look: new THREE.Vector3(-4, 1, -6) },
-  desk: { stand: new THREE.Vector3(2.2, 0, -2.4), look: new THREE.Vector3(2.2, 1, -4) },
-  terminal: { stand: new THREE.Vector3(5.6, 0, -3.3), look: new THREE.Vector3(7, 1, -4.8) },
-  cabinet: { stand: new THREE.Vector3(-6.2, 0, 0.4), look: new THREE.Vector3(-8, 1, 0.4) },
-  window: { stand: new THREE.Vector3(-6, 0, 3.6), look: new THREE.Vector3(-8, 1.6, 3.6) },
-  switchboard: { stand: new THREE.Vector3(5.6, 0, 2), look: new THREE.Vector3(8, 1, 2) },
-  lounge: { stand: new THREE.Vector3(-1.4, 0, 3.4), look: new THREE.Vector3(1, 0, 1) },
-  door: { stand: new THREE.Vector3(4.6, 0, 4.6), look: new THREE.Vector3(4.6, 1, 0) },
-  floor: { stand: new THREE.Vector3(0.8, 0, 2.3), look: new THREE.Vector3(0, 1, 0) },
+  shelf: { stand: new THREE.Vector3(-9.6, 0, -7.0), look: new THREE.Vector3(-9.6, 1, -9.5) },
+  desk: { stand: new THREE.Vector3(1.5, 0, -5.1), look: new THREE.Vector3(1.5, 1, -6.8) },
+  terminal: { stand: new THREE.Vector3(8.4, 0, -4.9), look: new THREE.Vector3(9.4, 1, -6.2) },
+  cabinet: { stand: new THREE.Vector3(-11.3, 0, 0.2), look: new THREE.Vector3(-13.5, 1, 0.2) },
+  window: { stand: new THREE.Vector3(-11.3, 0, -4.4), look: new THREE.Vector3(-13.5, 1.6, -4.6) },
+  switchboard: { stand: new THREE.Vector3(12.2, 0, 1.5), look: new THREE.Vector3(14.3, 1, 1.5) },
+  lounge: { stand: new THREE.Vector3(-10.2, 0, 6.3), look: new THREE.Vector3(-8, 0, 3) },
+  door: { stand: new THREE.Vector3(9.5, 0, 7.4), look: new THREE.Vector3(9.5, 1, 10) },
+  floor: { stand: new THREE.Vector3(0, 0, 4.4), look: new THREE.Vector3(0, 1, 0) },
 };
+
+/** The warehouse floor and wall height. */
+const W = 30;
+const D = 20;
+const H = 7;
 
 export const KIND_STATION: Record<ToolKind, StationId> = {
   read: 'shelf',
@@ -429,7 +434,7 @@ export class Robot {
 }
 
 /** The blueprint table, in world space, grown by a robot's radius: robots route around it. */
-const TABLE = { x: -0.6, z: -0.3, w: 5.2, d: 3.4, h: 0.8 };
+const TABLE = { x: 0, z: -0.2, w: 8.4, d: 5.2, h: 0.9 };
 const KEEP_OUT = { x0: TABLE.x - TABLE.w / 2 - 0.65, x1: TABLE.x + TABLE.w / 2 + 0.65, z0: TABLE.z - TABLE.d / 2 - 0.65, z1: TABLE.z + TABLE.d / 2 + 0.65 };
 
 function crossesTable(a: THREE.Vector3, b: THREE.Vector3): boolean {
@@ -530,21 +535,28 @@ export class Workshop {
   private beams: { mesh: THREE.Mesh; robot: Robot; to: THREE.Vector3; life: number }[] = [];
   private flying: { mesh: THREE.Mesh; from: THREE.Vector3; robot: Robot; t: number; label: CSS2DObject; back: boolean }[] = [];
 
-  private deskScreen = new Screen(1.5, 0.9);
+  private deskScreen = new Screen(1.38, 0.82);
   private termScreen = new Screen(1.6, 1.1);
+  private cratePos: THREE.Vector3[] = [];
+  private arms: { turret: THREE.Group; lower: THREE.Group; upper: THREE.Group; phase: number }[] = [];
+  private conveyor: THREE.Mesh[] = [];
+  private crane: { bridge: THREE.Group; hoist: THREE.Group } | null = null;
+  private fans: THREE.Group[] = [];
   private leds!: THREE.InstancedMesh;
   private telescope = new THREE.Group();
   private drawer!: THREE.Mesh;
   private boardLights!: THREE.InstancedMesh;
   private portal!: THREE.Mesh;
-  private alarm = new THREE.PointLight('#ff2a2a', 0, 9, 1.6);
-  private spot = new THREE.SpotLight('#fff1c9', 0, 14, 0.32, 0.5, 1.2);
+  private alarm = new THREE.PointLight('#ff2a2a', 0, 14, 1.4);
+  private spot = new THREE.SpotLight('#fff1c9', 0, 22, 0.3, 0.5, 1.2);
   private key!: THREE.DirectionalLight;
   private hemi!: THREE.HemisphereLight;
   private alarmT = 0;
   private busy = { desk: 0, terminal: 0, switchboard: 0, cabinet: 0, window: 0 };
   private waiting = false;
   private small = false;
+  private pace = 0.25;
+  private machineT = 0;
   private labelTick = 0;
 
   constructor(private canvas: HTMLCanvasElement, private hooks: StageHooks) {
@@ -559,17 +571,17 @@ export class Workshop {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.camera = new THREE.PerspectiveCamera(30, 1, 0.1, 200);
-    this.camera.position.set(16.5, 15, 19);
+    this.camera.position.set(24, 22, 28);
     this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.target.set(-0.3, 0.6, -0.6);
+    this.controls.target.set(0, 0.8, -0.6);
     this.controls.enableDamping = true;
     this.controls.maxPolarAngle = Math.PI * 0.46;
     this.controls.minDistance = 8;
-    this.controls.maxDistance = 48;
+    this.controls.maxDistance = 80;
 
     const bg = new THREE.Color('#0b0d14');
     this.scene.background = bg;
-    this.scene.fog = new THREE.Fog(bg, 30, 70);
+    this.scene.fog = new THREE.Fog(bg, 50, 110);
 
     this.labels.domElement.className = 'labels';
     document.body.append(this.labels.domElement);
@@ -613,296 +625,482 @@ export class Workshop {
     return b;
   }
 
+  private cyl(rt: number, rb: number, h: number, m: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D = this.scene, seg = 16) {
+    const c = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), m);
+    c.position.set(x, y, z);
+    c.castShadow = true;
+    c.receiveShadow = true;
+    parent.add(c);
+    return c;
+  }
+
+  /** Painted once: a canvas texture with stripes, joints or whatever `paint` draws. */
+  private painted(w: number, h: number, paint: (g: CanvasRenderingContext2D) => void, repeat = [1, 1]) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    paint(c.getContext('2d')!);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repeat[0], repeat[1]);
+    return t;
+  }
+
   private buildRoom() {
     const s = this.scene;
-    this.hemi = new THREE.HemisphereLight('#b4c8ff', '#4a3a30', 1.4);
+    this.hemi = new THREE.HemisphereLight('#c8d4ff', '#4a3a30', 1.3);
     s.add(this.hemi);
-    this.key = new THREE.DirectionalLight('#ffe3c2', 2.4);
-    this.key.position.set(8, 14, 6);
+    this.key = new THREE.DirectionalLight('#fff0dc', 2.2);
+    this.key.position.set(12, 26, 10);
     this.key.castShadow = true;
     this.key.shadow.mapSize.set(this.small ? 1024 : 2048, this.small ? 1024 : 2048);
-    Object.assign(this.key.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 40 });
+    Object.assign(this.key.shadow.camera, { left: -20, right: 20, top: 20, bottom: -20, near: 1, far: 70 });
     this.key.shadow.bias = -0.0005;
     s.add(this.key);
-    this.alarm.position.set(7, 3.4, -4.6);
-    s.add(this.alarm);
-    s.add(this.spot, this.spot.target);
+    this.alarm.position.set(10, 5, -6);
+    s.add(this.alarm, this.spot, this.spot.target);
 
-    // floor: a tile grid painted once
-    const fc = document.createElement('canvas');
-    fc.width = fc.height = 1024;
-    const g = fc.getContext('2d')!;
-    g.fillStyle = '#231f2b';
-    g.fillRect(0, 0, 1024, 1024);
-    for (let i = 0; i < 16; i++) {
-      for (let j = 0; j < 12; j++) {
-        g.fillStyle = (i + j) % 2 ? '#262230' : '#2a2534';
-        g.fillRect(i * 64, j * (1024 / 12), 64, 1024 / 12);
+    // Concrete, with expansion joints.
+    const concrete = this.painted(512, 512, (g) => {
+      g.fillStyle = '#4a4c52';
+      g.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 4000; i++) {
+        g.fillStyle = `rgba(${Math.random() < 0.5 ? '0,0,0' : '255,255,255'},${Math.random() * 0.05})`;
+        g.fillRect(Math.random() * 512, Math.random() * 512, 3, 3);
       }
-    }
-    g.strokeStyle = 'rgba(120,170,255,0.10)';
-    g.lineWidth = 2;
-    for (let i = 0; i <= 16; i++) {
-      g.beginPath();
-      g.moveTo(i * 64, 0);
-      g.lineTo(i * 64, 1024);
-      g.stroke();
-    }
-    for (let j = 0; j <= 12; j++) {
-      g.beginPath();
-      g.moveTo(0, j * (1024 / 12));
-      g.lineTo(1024, j * (1024 / 12));
-      g.stroke();
-    }
-    const ft = new THREE.CanvasTexture(fc);
-    ft.colorSpace = THREE.SRGBColorSpace;
-    const floor = new THREE.Mesh(new THREE.BoxGeometry(16, 0.4, 12), [
-      this.mat('#17141d'),
-      this.mat('#17141d'),
-      new THREE.MeshStandardMaterial({ map: ft, roughness: 0.85 }),
-      this.mat('#17141d'),
-      this.mat('#17141d'),
-      this.mat('#17141d'),
+      g.strokeStyle = 'rgba(0,0,0,0.35)';
+      g.lineWidth = 3;
+      g.strokeRect(0, 0, 512, 512);
+    }, [6, 4]);
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(W, 0.4, D), [
+      this.mat('#202127'),
+      this.mat('#202127'),
+      new THREE.MeshStandardMaterial({ map: concrete, roughness: 0.9 }),
+      this.mat('#202127'),
+      this.mat('#202127'),
+      this.mat('#202127'),
     ]);
     floor.position.y = -0.2;
     floor.receiveShadow = true;
     s.add(floor);
-    // the platform floats; its rim glows
-    const rim = new THREE.Mesh(new THREE.BoxGeometry(16.1, 0.05, 12.1), new THREE.MeshBasicMaterial({ color: '#4fb8ff' }));
+    const rim = new THREE.Mesh(new THREE.BoxGeometry(W + 0.1, 0.05, D + 0.1), new THREE.MeshBasicMaterial({ color: '#ffb347' }));
     rim.position.y = -0.42;
     s.add(rim);
 
-    const wall = this.mat('#3a4258', 0.9);
-    this.box(16, 4.2, 0.3, wall, 0, 2.1, -6.15);
-    this.box(0.3, 4.2, 12, wall, -8.15, 2.1, 0);
+    // Yellow safety lines around the working areas.
+    const hazard = new THREE.MeshBasicMaterial({ color: '#d9a400' });
+    const line = (x: number, z: number, w: number, d: number) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.012, d), hazard);
+      m.position.set(x, 0.006, z);
+      s.add(m);
+    };
+    line(0, -3.6, 11, 0.08);
+    line(0, 3.2, 11, 0.08);
+    line(-5.5, -0.2, 0.08, 6.8);
+    line(5.5, -0.2, 0.08, 6.8);
+    line(10.6, -2.2, 0.08, 7.6);
+
+    // Corrugated walls, steel columns and roof trusses; the roof itself is left off so we can look in.
+    const corrugated = this.painted(256, 64, (g) => {
+      for (let x = 0; x < 256; x++) {
+        const v = 70 + Math.sin(x / 4) * 18;
+        g.fillStyle = `rgb(${v},${v + 6},${v + 18})`;
+        g.fillRect(x, 0, 1, 64);
+      }
+    }, [10, 1]);
+    const wallMat = new THREE.MeshStandardMaterial({ map: corrugated, roughness: 0.6, metalness: 0.4 });
+    this.box(W, H, 0.3, wallMat, 0, H / 2, -D / 2 - 0.15);
+    this.box(0.3, H, D, wallMat, -W / 2 - 0.15, H / 2, 0);
+    const steel = this.mat('#3d4250', 0.4, 0.8);
+    const orange = this.mat('#d9622b', 0.5, 0.5);
+    for (let x = -W / 2; x <= W / 2 + 0.01; x += 6) this.box(0.35, H, 0.35, steel, x, H / 2, -D / 2 + 0.1);
+    for (let z = -D / 2; z <= D / 2 + 0.01; z += 5) this.box(0.35, H, 0.35, steel, -W / 2 + 0.1, H / 2, z);
+    // Pipes along the back wall, with red valves.
+    for (const [y, r, c] of [
+      [5.6, 0.18, '#7a8090'],
+      [5.1, 0.12, '#b0543a'],
+      [4.7, 0.1, '#3a8a5a'],
+    ] as [number, number, string][]) {
+      const p = this.cyl(r, r, W - 1, this.mat(c, 0.4, 0.7), 0, y, -D / 2 + 0.45, s, 12);
+      p.rotation.z = Math.PI / 2;
+      for (let x = -W / 2 + 4; x < W / 2; x += 7) this.cyl(r * 1.6, r * 1.6, 0.14, this.mat('#c0392b', 0.5, 0.4), x, y, -D / 2 + 0.45, s, 10).rotation.z = Math.PI / 2;
+    }
     const trim = new THREE.MeshBasicMaterial({ color: '#ffb347' });
-    this.box(16, 0.06, 0.06, trim, 0, 4.2, -6);
-    this.box(0.06, 0.06, 12, trim, -8, 4.2, 0);
+    this.box(W, 0.06, 0.06, trim, 0, H + 0.15, -D / 2);
+    this.box(0.06, 0.06, D, trim, -W / 2, H + 0.15, 0);
+
+    // Pendant lamps hung from the trusses: a few real lights, many glowing shades.
+    for (const [x, z, lit] of [
+      [-8, -5, true],
+      [0, -5, false],
+      [8, -5, true],
+      [-8, 2.5, false],
+      [0, 2.5, true],
+      [8, 2.5, false],
+    ] as [number, number, boolean][]) {
+      this.cyl(0.015, 0.015, 1.8, this.mat('#111'), x, H - 0.9, z, s, 6);
+      const shade = new THREE.Mesh(
+        new THREE.ConeGeometry(0.45, 0.4, 20, 1, true),
+        new THREE.MeshStandardMaterial({ color: '#2b2f3a', side: THREE.DoubleSide, roughness: 0.4, metalness: 0.6 }),
+      );
+      shade.position.set(x, H - 1.9, z);
+      s.add(shade);
+      const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 8), new THREE.MeshBasicMaterial({ color: '#fff1c9' }));
+      bulb.position.set(x, H - 2.05, z);
+      s.add(bulb);
+      if (lit) {
+        const l = new THREE.PointLight('#ffe6c2', 14, 14, 1.4);
+        l.position.set(x, H - 2.2, z);
+        s.add(l);
+      }
+    }
 
     this.city.group.position.set(TABLE.x, 0, TABLE.z);
-    this.scene.add(this.city.group);
-    const holo = new THREE.PointLight('#4fb8ff', 3, 6, 1.6);
-    holo.position.set(TABLE.x, TABLE.h + 1.6, TABLE.z);
-    this.scene.add(holo);
-    this.buildShelf();
-    this.buildDesk();
-    this.buildTerminal();
-    this.buildCabinet();
-    this.buildWindow();
-    this.buildSwitchboard();
-    this.buildLounge();
-    this.buildPortal();
+    s.add(this.city.group);
+    const holo = new THREE.PointLight('#4fb8ff', 5, 9, 1.6);
+    holo.position.set(TABLE.x, TABLE.h + 2.2, TABLE.z);
+    s.add(holo);
 
-    // dust in the light
-    for (let i = 0; i < 40; i++) {
-      this.sparks.emit(new THREE.Vector3((Math.random() - 0.5) * 14, Math.random() * 3.5, (Math.random() - 0.5) * 10), new THREE.Vector3(), new THREE.Color('#ffe6b0'), 0.01, 0.01);
-    }
+    this.buildRacks();
+    this.buildAssemblyLine();
+    this.buildServerRoom();
+    this.buildScanner();
+    this.buildComms();
+    this.buildControlPanel();
+    this.buildBreakRoom();
+    this.buildLoadingBay();
+    this.buildCrane();
+    this.buildClutter(orange);
   }
 
-  private buildShelf() {
-    const wood = this.mat('#5a3d2b', 0.8);
-    const shelf = new THREE.Group();
-    shelf.position.set(-4, 0, -5.75);
-    this.scene.add(shelf);
-    this.box(6.2, 3.6, 0.5, this.mat('#3b281d', 0.85), 0, 1.8, -0.05, shelf);
-    for (let r = 0; r < 5; r++) this.box(6.2, 0.06, 0.55, wood, 0, 0.3 + r * 0.72, 0.05, shelf);
-    // Scenery now: the project lives on the blueprint table.
-    const n = 230;
-    const books = new THREE.InstancedMesh(new THREE.BoxGeometry(0.11, 1, 0.38), new THREE.MeshStandardMaterial({ roughness: 0.6 }), n);
+  /** Pallet racks of crates, where robots go to read: a crate comes down carrying the file. */
+  private buildRacks() {
+    const upright = this.mat('#2c5aa0', 0.5, 0.5);
+    const beam = this.mat('#e07a1f', 0.5, 0.4);
+    const crates = new THREE.InstancedMesh(new THREE.BoxGeometry(0.75, 0.6, 0.85), new THREE.MeshStandardMaterial({ roughness: 0.85 }), 72);
     const m = new THREE.Matrix4();
-    for (let i = 0; i < n; i++) {
-      const p = this.bookSlot(i);
-      const h = 0.4 + Math.random() * 0.24;
-      m.compose(new THREE.Vector3(p.x, p.y + h / 2, p.z), new THREE.Quaternion(), new THREE.Vector3(1, h, 1));
-      books.setMatrixAt(i, m);
-      books.setColorAt(i, new THREE.Color().setHSL(Math.random(), 0.45, 0.32 + Math.random() * 0.15));
+    let n = 0;
+    for (let bay = 0; bay < 3; bay++) {
+      const x0 = -13.2 + bay * 3.1;
+      for (const x of [x0, x0 + 2.9]) this.box(0.1, 4.6, 1.1, upright, x, 2.3, -D / 2 + 0.85);
+      for (let level = 0; level < 4; level++) {
+        const y = 0.25 + level * 1.15;
+        this.box(2.9, 0.1, 0.08, beam, x0 + 1.45, y, -D / 2 + 0.35);
+        this.box(2.9, 0.1, 0.08, beam, x0 + 1.45, y, -D / 2 + 1.35);
+        for (let k = 0; k < 3; k++) {
+          if (Math.random() < 0.15) continue;
+          const p = new THREE.Vector3(x0 + 0.5 + k * 0.95, y + 0.36, -D / 2 + 0.85);
+          m.makeTranslation(p.x, p.y, p.z);
+          crates.setMatrixAt(n, m);
+          const tone = 0.32 + Math.random() * 0.12;
+          crates.setColorAt(n, new THREE.Color().setHSL(0.08, 0.45, tone));
+          this.cratePos.push(p);
+          n++;
+        }
+      }
     }
-    books.castShadow = true;
-    books.position.copy(shelf.position);
-    this.scene.add(books);
+    crates.count = n;
+    crates.castShadow = true;
+    this.scene.add(crates);
   }
 
-  private bookSlot(i: number): THREE.Vector3 {
-    const perRow = 46;
-    const row = Math.floor(i / perRow);
-    const col = i % perRow;
-    return new THREE.Vector3(-2.75 + col * 0.12, 0.33 + row * 0.72, 0.12);
-  }
-
-  private buildDesk() {
-    const wood = this.mat('#6b4a33', 0.6);
-    const g = new THREE.Group();
-    g.position.set(2.2, 0, -3.8);
-    this.scene.add(g);
-    this.box(2.6, 0.08, 1.2, wood, 0, 0.9, 0, g);
-    for (const [x, z] of [
-      [-1.2, -0.5],
-      [1.2, -0.5],
-      [-1.2, 0.5],
-      [1.2, 0.5],
-    ])
-      this.box(0.08, 0.9, 0.08, wood, x, 0.45, z, g);
-    this.box(1.7, 1.05, 0.08, this.mat('#15171f', 0.4, 0.3), 0, 1.65, -0.35, g);
-    this.box(0.1, 0.35, 0.1, this.mat('#15171f'), 0, 1.05, -0.35, g);
-    this.deskScreen.mesh.position.set(0, 1.65, -0.3);
-    g.add(this.deskScreen.mesh);
-    this.box(0.9, 0.04, 0.3, this.mat('#2a2d38', 0.5), 0, 0.96, 0.2, g);
-    const glow = new THREE.PointLight('#5fc8ff', 3, 4, 1.8);
-    glow.position.set(0, 1.6, 0.4);
-    g.add(glow);
+  /** Workbenches with monitors, robotic arms behind them, and a conveyor running past. */
+  private buildAssemblyLine() {
+    const top = this.mat('#6b4a33', 0.6, 0);
+    const steel = this.mat('#3a3f4e', 0.4, 0.7);
+    const z = -6.6;
+    this.box(9.5, 0.1, 1.1, top, 1.2, 0.95, z);
+    for (let x = -3.3; x <= 5.8; x += 1.8) this.box(0.08, 0.95, 1, steel, x, 0.475, z);
+    for (const [x, main] of [
+      [-1.8, false],
+      [1.5, true],
+      [4.6, false],
+    ] as [number, boolean][]) {
+      this.box(1.5, 0.95, 0.08, this.mat('#15171f', 0.4, 0.3), x, 1.75, z - 0.4);
+      this.box(0.1, 0.3, 0.1, this.mat('#15171f'), x, 1.15, z - 0.4);
+      this.box(0.8, 0.04, 0.3, this.mat('#2a2d38', 0.5), x, 1.02, z + 0.1);
+      if (main) {
+        this.deskScreen.mesh.position.set(x, 1.75, z - 0.355);
+        this.scene.add(this.deskScreen.mesh);
+      } else {
+        const sc = new Screen(1.38, 0.82, 256);
+        sc.lines(x < 0 ? 'lint' : 'fmt', [{ text: 'ok', color: '#9dff8a' }]);
+        sc.mesh.position.set(x, 1.75, z - 0.355);
+        this.scene.add(sc.mesh);
+      }
+    }
+    const glow = new THREE.PointLight('#5fc8ff', 4, 6, 1.8);
+    glow.position.set(1.5, 2, z + 0.8);
+    this.scene.add(glow);
     this.deskScreen.idle('editor · idle');
+
+    // Robotic arms: base, two segments and a gripper, swinging over the conveyor.
+    for (const x of [-0.2, 3.2]) {
+      const arm = new THREE.Group();
+      arm.position.set(x, 0, -7.6);
+      this.cyl(0.35, 0.45, 0.4, this.mat('#2b2f3a', 0.4, 0.7), 0, 0.2, 0, arm);
+      const turret = new THREE.Group();
+      turret.position.y = 0.4;
+      arm.add(turret);
+      const lower = new THREE.Group();
+      lower.position.y = 0.25;
+      turret.add(lower);
+      this.box(0.22, 1.3, 0.22, this.mat('#f0a500', 0.45, 0.4), 0, 0.65, 0, lower);
+      const upper = new THREE.Group();
+      upper.position.y = 1.3;
+      lower.add(upper);
+      this.box(0.18, 1.1, 0.18, this.mat('#f0a500', 0.45, 0.4), 0, 0.55, 0, upper);
+      this.box(0.3, 0.12, 0.3, this.mat('#2b2f3a', 0.4, 0.7), 0, 1.15, 0, upper);
+      this.scene.add(arm);
+      this.arms.push({ turret, lower, upper, phase: Math.random() * 6 });
+    }
+
+    // Conveyor with rollers and boxes riding it.
+    const belt = this.box(13, 0.08, 0.9, this.mat('#1c1d22', 0.9, 0.1), 2.5, 0.85, -8.7);
+    belt.receiveShadow = true;
+    for (let x = -3.8; x <= 8.8; x += 0.6) this.cyl(0.05, 0.05, 0.95, steel, x, 0.79, -8.7, this.scene, 8).rotation.x = Math.PI / 2;
+    for (const x of [-3.8, 8.8]) {
+      this.box(0.08, 0.8, 0.08, steel, x, 0.4, -9.1);
+      this.box(0.08, 0.8, 0.08, steel, x, 0.4, -8.3);
+    }
+    for (let i = 0; i < 7; i++) {
+      const b = this.box(0.5, 0.4, 0.5, this.mat(i % 3 ? '#a8794e' : '#7a8a9a', 0.85), -3.5 + i * 1.8, 1.09, -8.7);
+      this.conveyor.push(b);
+    }
   }
 
-  private buildTerminal() {
+  /** Rows of racks with blinking lights, and the console where shell commands run. */
+  private buildServerRoom() {
     const g = new THREE.Group();
-    g.position.set(7, 0, -4.8);
-    g.rotation.y = -Math.PI / 4;
     this.scene.add(g);
-    this.box(1.3, 3.2, 1, this.mat('#1b1e28', 0.45, 0.5), 0, 1.6, 0, g);
-    this.termScreen.mesh.position.set(0, 2.2, 0.51);
-    g.add(this.termScreen.mesh);
-    const leds = new THREE.InstancedMesh(new THREE.BoxGeometry(0.06, 0.03, 0.02), new THREE.MeshBasicMaterial(), 48);
+    const rackMat = this.mat('#13151c', 0.35, 0.6);
+    const ledsPer = 18;
+    const racks: THREE.Vector3[] = [];
+    for (let row = 0; row < 3; row++) for (let i = 0; i < 4; i++) racks.push(new THREE.Vector3(11.6 + i * 0.85, 0, -9.2 + row * 1.9));
+    const leds = new THREE.InstancedMesh(new THREE.BoxGeometry(0.05, 0.025, 0.02), new THREE.MeshBasicMaterial(), racks.length * ledsPer);
     const m = new THREE.Matrix4();
-    for (let i = 0; i < 48; i++) {
-      m.setPosition(-0.5 + (i % 12) * 0.09, 0.4 + Math.floor(i / 12) * 0.22, 0.51);
-      leds.setMatrixAt(i, m);
-      leds.setColorAt(i, new THREE.Color('#1f6b3a'));
-    }
+    racks.forEach((p, ri) => {
+      this.box(0.75, 2.3, 1, rackMat, p.x, 1.15, p.z, g);
+      for (let k = 0; k < ledsPer; k++) {
+        m.makeTranslation(p.x - 0.28 + (k % 6) * 0.11, 0.5 + Math.floor(k / 6) * 0.55, p.z + 0.51);
+        leds.setMatrixAt(ri * ledsPer + k, m);
+        leds.setColorAt(ri * ledsPer + k, new THREE.Color('#1f6b3a'));
+      }
+    });
     g.add(leds);
     this.leds = leds;
-    const glow = new THREE.PointLight('#ff5fa2', 2.5, 5, 1.8);
-    glow.position.set(0, 2.2, 1);
-    g.add(glow);
+    // Cable tray overhead, and cold light.
+    this.box(3.6, 0.08, 0.5, this.mat('#555b6a', 0.4, 0.8), 12.9, 2.7, -7.3, g);
+    const cold = new THREE.PointLight('#6fb8ff', 8, 8, 1.6);
+    cold.position.set(12.8, 3.2, -7);
+    g.add(cold);
+    // Console.
+    const console_ = new THREE.Group();
+    console_.position.set(9.4, 0, -6.2);
+    console_.rotation.y = -Math.PI / 5;
+    g.add(console_);
+    this.box(1.8, 0.9, 0.8, this.mat('#1b1e28', 0.4, 0.6), 0, 0.45, 0, console_);
+    this.box(1.8, 1.25, 0.1, this.mat('#1b1e28', 0.4, 0.6), 0, 1.55, -0.35, console_);
+    this.termScreen.mesh.position.set(0, 1.55, -0.29);
+    console_.add(this.termScreen.mesh);
+    const pink = new THREE.PointLight('#ff5fa2', 3, 5, 1.8);
+    pink.position.set(0, 1.6, 0.6);
+    console_.add(pink);
     this.termScreen.lines('zsh', [{ text: '$ _', color: '#9dff8a' }]);
   }
 
-  private buildCabinet() {
+  /** A scanning gantry for searches: its head sweeps while a search runs. */
+  private buildScanner() {
     const g = new THREE.Group();
-    g.position.set(-7.55, 0, 0.4);
-    g.rotation.y = Math.PI / 2;
+    g.position.set(-13.2, 0, 0.2);
     this.scene.add(g);
-    const wood = this.mat('#7a5a3c', 0.65);
-    this.box(1.6, 1.5, 0.8, wood, 0, 0.75, 0, g);
-    const brass = this.mat('#d6a85a', 0.3, 0.8);
-    for (let r = 0; r < 3; r++) {
-      for (let c = 0; c < 3; c++) {
-        const d = this.box(0.44, 0.38, 0.04, this.mat('#8d6a48', 0.6), -0.5 + c * 0.5, 0.3 + r * 0.45, 0.42, g);
-        this.box(0.1, 0.03, 0.03, brass, 0, 0, 0.03, d);
-        if (r === 1 && c === 1) this.drawer = d;
-      }
-    }
-    const lamp = new THREE.PointLight('#ffcf7a', 0, 3, 1.6);
-    lamp.position.set(0, 1.8, 0.6);
+    const frame = this.mat('#3d4250', 0.4, 0.8);
+    this.box(0.15, 2.6, 0.15, frame, 0, 1.3, -1.2, g);
+    this.box(0.15, 2.6, 0.15, frame, 0, 1.3, 1.2, g);
+    this.box(0.2, 0.2, 2.6, frame, 0, 2.6, 0, g);
+    this.box(1.2, 0.8, 2.2, this.mat('#2b2f3a', 0.5, 0.5), 0, 0.4, 0, g);
+    const head = this.box(0.4, 0.3, 0.4, this.mat('#9a8cff', 0.4, 0.4, '#9a8cff', 0.6), 0, 2.4, 0, g);
+    const laser = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.03, 1.6),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color('#ff3b6b').multiplyScalar(3), transparent: true, opacity: 0.8 }),
+    );
+    laser.position.y = -0.95;
+    head.add(laser);
+    this.drawer = head;
+    const lamp = new THREE.PointLight('#9a8cff', 0, 5, 1.6);
+    lamp.position.set(0.6, 2, 0);
     lamp.name = 'cabinet-lamp';
     g.add(lamp);
   }
 
-  private buildWindow() {
-    const wc = document.createElement('canvas');
-    wc.width = 256;
-    wc.height = 192;
-    const c = wc.getContext('2d')!;
-    const grad = c.createLinearGradient(0, 0, 0, 192);
-    grad.addColorStop(0, '#0a1030');
-    grad.addColorStop(1, '#3a2a6a');
-    c.fillStyle = grad;
-    c.fillRect(0, 0, 256, 192);
-    for (let i = 0; i < 70; i++) {
-      c.fillStyle = `rgba(255,255,255,${0.3 + Math.random() * 0.7})`;
-      c.fillRect(Math.random() * 256, Math.random() * 150, 1.5, 1.5);
-    }
-    c.fillStyle = '#ffe9b8';
-    c.beginPath();
-    c.arc(190, 50, 16, 0, Math.PI * 2);
-    c.fill();
-    const t = new THREE.CanvasTexture(wc);
-    t.colorSpace = THREE.SRGBColorSpace;
-    const win = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.8), new THREE.MeshBasicMaterial({ map: t }));
-    win.position.set(-7.98, 2.3, 3.6);
-    win.rotation.y = Math.PI / 2;
-    this.scene.add(win);
-    const frame = this.mat('#4a3424', 0.7);
-    this.box(0.12, 0.1, 2.6, frame, -7.95, 3.25, 3.6);
-    this.box(0.12, 0.1, 2.6, frame, -7.95, 1.35, 3.6);
-    this.box(0.12, 1.95, 0.1, frame, -7.95, 2.3, 2.3);
-    this.box(0.12, 1.95, 0.1, frame, -7.95, 2.3, 4.9);
-    const moon = new THREE.PointLight('#a9b8ff', 2, 6, 1.5);
-    moon.position.set(-7, 2.4, 3.6);
-    this.scene.add(moon);
-
-    const brass = this.mat('#d6a85a', 0.25, 0.85);
-    this.telescope.position.set(-7, 0, 3.6);
-    for (let i = 0; i < 3; i++) {
-      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.3), this.mat('#3a2a20'));
-      const a = (i / 3) * Math.PI * 2;
-      leg.position.set(Math.cos(a) * 0.25, 0.6, Math.sin(a) * 0.25);
-      leg.rotation.set(Math.sin(a) * 0.35, 0, -Math.cos(a) * 0.35);
-      this.telescope.add(leg);
-    }
-    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.13, 1.2, 20), brass);
-    tube.rotation.z = Math.PI / 2 - 0.5;
-    tube.position.set(-0.1, 1.35, 0);
-    tube.castShadow = true;
-    tube.name = 'tube';
-    this.telescope.add(tube);
-    this.scene.add(this.telescope);
+  /** The comms station: a satellite dish and a radio rack, for web lookups. */
+  private buildComms() {
+    const g = this.telescope;
+    g.position.set(-13.2, 0, -4.6);
+    this.scene.add(g);
+    this.box(1.2, 1.8, 0.7, this.mat('#2a2f3c', 0.5, 0.5), 0, 0.9, 1.1, g);
+    for (let i = 0; i < 6; i++) this.box(0.9, 0.04, 0.02, this.mat('#5fffd0', 0.4, 0, '#5fffd0', 1.2), 0, 0.5 + i * 0.22, 1.46, g);
+    this.cyl(0.06, 0.12, 1.6, this.mat('#8a93a8', 0.4, 0.7), 0, 0.8, -0.3, g, 8);
+    const dish = new THREE.Mesh(new THREE.SphereGeometry(0.9, 24, 12, 0, Math.PI * 2, 0, Math.PI / 3), this.mat('#d8dce6', 0.3, 0.5));
+    dish.position.set(0, 1.8, -0.3);
+    dish.rotation.x = -Math.PI / 2.6;
+    dish.castShadow = true;
+    dish.name = 'tube';
+    g.add(dish);
   }
 
-  private buildSwitchboard() {
+  /** A wall of switches and lamps, for MCP calls. */
+  private buildControlPanel() {
     const g = new THREE.Group();
-    g.position.set(7.4, 0, 2);
+    g.position.set(14.3, 0, 1.5);
     g.rotation.y = -Math.PI / 2;
     this.scene.add(g);
-    this.box(2, 1.9, 0.4, this.mat('#4a3426', 0.7), 0, 0.95, 0, g);
-    const lights = new THREE.InstancedMesh(new THREE.SphereGeometry(0.045, 10, 8), new THREE.MeshBasicMaterial(), 24);
+    this.box(3.2, 2.4, 0.5, this.mat('#4a5568', 0.5, 0.5), 0, 1.2, 0, g);
+    const lights = new THREE.InstancedMesh(new THREE.SphereGeometry(0.05, 10, 8), new THREE.MeshBasicMaterial(), 40);
     const m = new THREE.Matrix4();
-    for (let i = 0; i < 24; i++) {
-      m.setPosition(-0.75 + (i % 8) * 0.21, 1.1 + Math.floor(i / 8) * 0.24, 0.22);
+    for (let i = 0; i < 40; i++) {
+      m.makeTranslation(-1.3 + (i % 10) * 0.29, 1.3 + Math.floor(i / 10) * 0.25, 0.27);
       lights.setMatrixAt(i, m);
       lights.setColorAt(i, new THREE.Color('#442a1a'));
     }
     g.add(lights);
     this.boardLights = lights;
+    for (let i = 0; i < 6; i++) {
+      const lever = this.box(0.05, 0.3, 0.05, this.mat('#222'), -1 + i * 0.4, 0.75, 0.32, g);
+      lever.rotation.x = 0.4;
+      this.box(0.1, 0.1, 0.1, this.mat('#c0392b'), -1 + i * 0.4, 0.9, 0.38, g);
+    }
   }
 
-  private buildLounge() {
-    const rug = new THREE.Mesh(new THREE.CircleGeometry(1.9, 48), this.mat('#5b2f4a', 0.95));
+  /** The break room, where idle robots wait. */
+  private buildBreakRoom() {
+    const rug = new THREE.Mesh(new THREE.CircleGeometry(2.4, 48), this.mat('#5b2f4a', 0.95));
     rug.rotation.x = -Math.PI / 2;
-    rug.position.set(-1.4, 0.01, 3.6);
+    rug.position.set(-10.2, 0.01, 6.2);
     rug.receiveShadow = true;
     this.scene.add(rug);
     const sofa = this.mat('#3f6f7a', 0.9);
-    this.box(3, 0.45, 0.9, sofa, -1.4, 0.3, 4.6);
-    this.box(3, 0.8, 0.25, sofa, -1.4, 0.75, 5.0);
-    this.box(0.25, 0.65, 0.9, sofa, -2.9, 0.45, 4.6);
-    this.box(0.25, 0.65, 0.9, sofa, 0.1, 0.45, 4.6);
-    this.box(0.04, 1.8, 0.04, this.mat('#222'), 1.0, 0.9, 5.2);
-    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.35, 0.4, 20, 1, true), new THREE.MeshStandardMaterial({ color: '#ffd9a0', emissive: '#ffb050', emissiveIntensity: 1.2, side: THREE.DoubleSide }));
-    shade.position.set(1.0, 1.85, 5.2);
-    this.scene.add(shade);
-    const lamp = new THREE.PointLight('#ffb764', 4, 6, 1.6);
-    lamp.position.set(1, 1.7, 5.0);
+    this.box(3.4, 0.45, 0.9, sofa, -10.2, 0.3, 7.6);
+    this.box(3.4, 0.8, 0.25, sofa, -10.2, 0.75, 8.0);
+    this.box(0.25, 0.65, 0.9, sofa, -11.9, 0.45, 7.6);
+    this.box(0.25, 0.65, 0.9, sofa, -8.5, 0.45, 7.6);
+    // Vending machine with a lit front, and a coffee machine on a counter.
+    this.box(1, 2, 0.8, this.mat('#b02a2a', 0.5, 0.3), -14.3, 1, 3.6);
+    this.box(0.7, 1.4, 0.05, this.mat('#ffffff', 0.3, 0, '#9fd8ff', 1.4), -13.9, 1.15, 3.6).rotation.y = Math.PI / 2;
+    this.box(1.6, 0.95, 0.7, this.mat('#6b4a33', 0.7), -14.3, 0.475, 5.6);
+    this.box(0.4, 0.5, 0.35, this.mat('#2b2f3a', 0.4, 0.7), -14.3, 1.2, 5.4);
+    this.cyl(0.07, 0.06, 0.12, this.mat('#f3ead2'), -14.1, 1.01, 5.9);
+    const lamp = new THREE.PointLight('#ffb764', 6, 7, 1.6);
+    lamp.position.set(-10.2, 2.4, 6.8);
     this.scene.add(lamp);
-    const plant = new THREE.Mesh(new THREE.IcosahedronGeometry(0.45, 1), this.mat('#3f8f4f', 0.8));
-    plant.position.set(-3.6, 0.9, 5.2);
+    const plant = new THREE.Mesh(new THREE.IcosahedronGeometry(0.5, 1), this.mat('#3f8f4f', 0.8));
+    plant.position.set(-7.6, 1, 8.6);
     this.scene.add(plant);
-    this.box(0.5, 0.5, 0.5, this.mat('#b0643a', 0.8), -3.6, 0.25, 5.2);
+    this.box(0.55, 0.55, 0.55, this.mat('#b0643a', 0.8), -7.6, 0.28, 8.6);
   }
 
-  private buildPortal() {
-    const frame = this.mat('#20232e', 0.4, 0.6);
+  /** The loading bay: a roller shutter in a frame, where helpers arrive. */
+  private buildLoadingBay() {
     const g = new THREE.Group();
-    g.position.set(4.6, 0, 5.85);
+    g.position.set(9.5, 0, D / 2 - 0.2);
     this.scene.add(g);
-    this.box(0.18, 2.6, 0.2, frame, -0.75, 1.3, 0, g);
-    this.box(0.18, 2.6, 0.2, frame, 0.75, 1.3, 0, g);
-    this.box(1.7, 0.18, 0.2, frame, 0, 2.6, 0, g);
+    const frame = this.mat('#2b2f3a', 0.4, 0.7);
+    this.box(0.3, 3.4, 0.3, frame, -1.6, 1.7, 0, g);
+    this.box(0.3, 3.4, 0.3, frame, 1.6, 1.7, 0, g);
+    this.box(3.5, 0.5, 0.4, frame, 0, 3.55, 0, g);
+    const shutter = this.painted(64, 128, (x) => {
+      for (let y = 0; y < 128; y += 8) {
+        x.fillStyle = y % 16 ? '#6b7280' : '#5a616d';
+        x.fillRect(0, y, 64, 8);
+      }
+    });
+    this.box(3, 0.9, 0.1, new THREE.MeshStandardMaterial({ map: shutter, metalness: 0.6, roughness: 0.4 }), 0, 2.85, 0, g);
     this.portal = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.32, 2.5),
+      new THREE.PlaneGeometry(2.9, 2.4),
       new THREE.MeshBasicMaterial({ color: '#c6ff6e', transparent: true, opacity: 0.15, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }),
     );
-    this.portal.position.set(0, 1.3, 0);
+    this.portal.position.set(0, 1.2, 0);
     g.add(this.portal);
+    // Hazard stripes on the floor in front of it, a pallet and a parked forklift.
+    const stripes = this.painted(128, 32, (x) => {
+      for (let i = -32; i < 160; i += 16) {
+        x.fillStyle = '#d9a400';
+        x.beginPath();
+        x.moveTo(i, 0);
+        x.lineTo(i + 8, 0);
+        x.lineTo(i - 8, 32);
+        x.lineTo(i - 16, 32);
+        x.fill();
+      }
+    });
+    const pad = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.8), new THREE.MeshBasicMaterial({ map: stripes }));
+    pad.rotation.x = -Math.PI / 2;
+    pad.position.set(0, 0.012, -0.8);
+    g.add(pad);
+    const fork = new THREE.Group();
+    fork.position.set(13, 0, 7);
+    fork.rotation.y = -0.6;
+    this.scene.add(fork);
+    this.box(1.1, 0.7, 1.6, this.mat('#f0a500', 0.5, 0.3), 0, 0.55, 0, fork);
+    this.box(0.9, 1, 0.05, this.mat('#222'), 0, 1.4, -0.1, fork).rotation.x = 0.1;
+    this.box(0.08, 2, 0.08, this.mat('#333', 0.4, 0.7), -0.4, 1.1, -0.85, fork);
+    this.box(0.08, 2, 0.08, this.mat('#333', 0.4, 0.7), 0.4, 1.1, -0.85, fork);
+    this.box(0.1, 0.05, 1, this.mat('#333', 0.4, 0.7), -0.3, 0.15, -1.3, fork);
+    this.box(0.1, 0.05, 1, this.mat('#333', 0.4, 0.7), 0.3, 0.15, -1.3, fork);
+    for (const [x, z] of [
+      [-0.4, 0.6],
+      [0.4, 0.6],
+      [-0.45, -0.5],
+      [0.45, -0.5],
+    ])
+      this.cyl(0.22, 0.22, 0.15, this.mat('#111'), x, 0.22, z, fork, 14).rotation.z = Math.PI / 2;
+  }
+
+  /** An overhead gantry crane that trundles along the hall, faster when work is under way. */
+  private buildCrane() {
+    const steel = this.mat('#e0b020', 0.5, 0.5);
+    // Only the back rail: a front one would cross the camera's view of the whole hall.
+    this.box(W - 1, 0.2, 0.2, this.mat('#3d4250', 0.4, 0.8), 0, H - 0.6, -D / 2 + 0.5);
+    const bridge = new THREE.Group();
+    bridge.position.y = H - 0.45;
+    this.box(0.4, 0.35, D - 0.8, steel, 0, 0, 0, bridge);
+    const hoist = new THREE.Group();
+    this.box(0.6, 0.4, 0.6, this.mat('#2b2f3a', 0.4, 0.7), 0, -0.35, 0, hoist);
+    this.cyl(0.015, 0.015, 2.2, this.mat('#111'), 0, -1.6, 0, hoist, 6);
+    this.box(0.35, 0.25, 0.2, this.mat('#c0392b', 0.5, 0.4), 0, -2.75, 0, hoist);
+    bridge.add(hoist);
+    this.scene.add(bridge);
+    this.crane = { bridge, hoist };
+  }
+
+  private buildClutter(orange: THREE.Material) {
+    for (const [x, z] of [
+      [6.8, 7.8],
+      [7.4, 8.4],
+      [6.9, 8.9],
+      [-3.8, 8.6],
+    ])
+      this.cyl(0.32, 0.32, 0.95, this.mat(Math.random() < 0.5 ? '#2c5aa0' : '#b0543a', 0.5, 0.4), x, 0.475, z, this.scene, 16);
+    for (let i = 0; i < 5; i++) this.box(0.8, 0.6, 0.8, this.mat('#a8794e', 0.85), 3 + (i % 3) * 0.85, 0.3 + Math.floor(i / 3) * 0.6, 8.6);
+    // A ventilation fan in the side wall.
+    const fan = new THREE.Group();
+    fan.position.set(-W / 2 + 0.05, 4.8, -1.5);
+    fan.rotation.y = Math.PI / 2;
+    this.scene.add(fan);
+    this.cyl(0.75, 0.75, 0.1, this.mat('#222'), 0, 0, 0, fan, 24).rotation.x = Math.PI / 2;
+    const blades = new THREE.Group();
+    blades.position.z = 0.08;
+    fan.add(blades);
+    for (let i = 0; i < 4; i++) {
+      const b = this.box(0.18, 0.65, 0.02, orange, 0, 0.32, 0, blades);
+      b.geometry.translate(0, 0, 0);
+      const pivot = new THREE.Group();
+      pivot.rotation.z = (i / 4) * Math.PI * 2;
+      pivot.add(b);
+      blades.add(pivot);
+    }
+    this.fans.push(blades);
   }
 
   // ---------------------------------------------------------------- the project, as a city
@@ -1147,7 +1345,7 @@ export class Workshop {
     const color = new THREE.Color(KIND_COLOR[t.kind]);
     switch (t.kind) {
       case 'read':
-        if (t.file) this.flyBook(Math.floor(Math.random() * 230), r, t.file);
+        if (t.file) this.flyBook(Math.floor(Math.random() * 1000), r, t.file);
         break;
       case 'edit':
       case 'write': {
@@ -1203,7 +1401,7 @@ export class Workshop {
         const roof = this.city.roof(t.file);
         if (roof) this.sparks.burst(roof, new THREE.Color(KIND_COLOR[t.kind]), 30, 1.6, 1, 0.16);
       }
-      this.sparks.burst(new THREE.Vector3(2.2, 1.1, -3.4), new THREE.Color(KIND_COLOR[t.kind]), 40, 4, 1.1, 0.3);
+      this.sparks.burst(new THREE.Vector3(1.5, 1.2, -6.3), new THREE.Color(KIND_COLOR[t.kind]), 40, 4, 1.1, 0.3);
     }
     if (t.ok) r.mood = 'happy';
     setTimeout(() => {
@@ -1212,10 +1410,11 @@ export class Workshop {
     r.current = null;
   }
 
+  /** A crate comes off the racks carrying the file's name, and goes back when the read is done. */
   private flyBook(i: number, r: Robot, file: string) {
-    const from = this.bookSlot(i).add(new THREE.Vector3(-4, 0.3, -5.75));
-    const tint = new THREE.Color().setHSL(Math.random(), 0.6, 0.55);
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.1), new THREE.MeshStandardMaterial({ color: tint, emissive: tint, emissiveIntensity: 1.5 }));
+    const from = (this.cratePos[i % Math.max(1, this.cratePos.length)] ?? new THREE.Vector3(-9.6, 1, -9)).clone();
+    const tint = new THREE.Color('#c8925a');
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.36, 0.5), new THREE.MeshStandardMaterial({ color: tint, emissive: '#6ec8ff', emissiveIntensity: 0.6 }));
     mesh.position.copy(from);
     this.scene.add(mesh);
     const el = document.createElement('div');
@@ -1230,7 +1429,7 @@ export class Workshop {
 
   private portalFlash() {
     (this.portal.material as THREE.MeshBasicMaterial).opacity = 0.9;
-    this.sparks.burst(new THREE.Vector3(4.6, 1.3, 5.6), new THREE.Color(KIND_COLOR.agent), 60, 3.5, 1.2, 0.3);
+    this.sparks.burst(new THREE.Vector3(9.5, 1.3, 9.2), new THREE.Color(KIND_COLOR.agent), 80, 4, 1.3, 0.3);
   }
 
   private confetti(p: THREE.Vector3) {
@@ -1322,20 +1521,41 @@ export class Workshop {
     // stations wind down
     for (const k of Object.keys(this.busy) as (keyof typeof this.busy)[]) this.busy[k] = Math.max(0, this.busy[k] - dt * 0.4);
     const c = new THREE.Color();
-    for (let i = 0; i < 48; i++) {
-      const on = Math.random() < 0.04 + this.busy.terminal * 0.5;
+    for (let i = 0; i < this.leds.count; i++) {
+      const on = Math.random() < 0.06 + this.busy.terminal * 0.5;
       if (Math.random() < 0.15) this.leds.setColorAt(i, c.set(on ? (i % 7 ? '#3dff7a' : '#ffb347') : '#163a24').multiplyScalar(on ? 2.5 : 1));
     }
     if (this.leds.instanceColor) this.leds.instanceColor.needsUpdate = true;
-    for (let i = 0; i < 24; i++) {
+    for (let i = 0; i < this.boardLights.count; i++) {
       if (Math.random() < 0.1) this.boardLights.setColorAt(i, c.set(Math.random() < this.busy.switchboard ? '#ff8a5f' : '#3a2416').multiplyScalar(this.busy.switchboard > 0.1 ? 3 : 1));
     }
     if (this.boardLights.instanceColor) this.boardLights.instanceColor.needsUpdate = true;
-    this.drawer.position.z = 0.42 + this.busy.cabinet * 0.35;
+    this.drawer.position.z = Math.sin(now * 3) * 0.9 * Math.min(1, this.busy.cabinet * 2);
+    this.drawer.visible = true;
     const lamp = this.scene.getObjectByName('cabinet-lamp') as THREE.PointLight | undefined;
     if (lamp) lamp.intensity = this.busy.cabinet * 4;
     const tube = this.telescope.getObjectByName('tube');
-    if (tube) tube.rotation.y = Math.sin(now * 0.8) * 0.5 * this.busy.window;
+    if (tube) tube.rotation.z = Math.sin(now * 0.8) * 0.6 * this.busy.window;
+
+    // The machinery hums along, and speeds up whenever any robot is at work.
+    const working = [...this.robots.values()].some((r) => !r.idle);
+    this.pace += ((working ? 1 : 0.25) - this.pace) * Math.min(1, dt);
+    this.machineT += dt * this.pace;
+    const mt = this.machineT;
+    for (const b of this.conveyor) {
+      b.position.x += dt * this.pace * 1.2;
+      if (b.position.x > 8.6) b.position.x -= 12.6;
+    }
+    for (const a of this.arms) {
+      a.turret.rotation.y = Math.sin(mt * 1.1 + a.phase) * 1.1;
+      a.lower.rotation.z = -0.35 + Math.sin(mt * 1.7 + a.phase) * 0.3;
+      a.upper.rotation.z = 0.9 + Math.sin(mt * 2.3 + a.phase) * 0.45;
+    }
+    if (this.crane) {
+      this.crane.bridge.position.x = Math.sin(mt * 0.15) * (W / 2 - 3);
+      this.crane.hoist.position.z = Math.sin(mt * 0.23) * (D / 2 - 2);
+    }
+    for (const f of this.fans) f.rotation.z += dt * (2 + this.pace * 6);
     const pm = this.portal.material as THREE.MeshBasicMaterial;
     pm.opacity = Math.max(0.12 + Math.sin(now * 2) * 0.04, pm.opacity - dt * 0.8);
 

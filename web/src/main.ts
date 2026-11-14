@@ -4,12 +4,12 @@ import { Inside } from './inside';
 
 type Stage = Workshop | Inside;
 
-/** Which scene to draw; the city is the default, the workshop the alternative. */
+/** Which scene to draw: the warehouse by default, the city-from-inside as the alternative. */
 function viewMode(): 'city' | 'workshop' {
   try {
-    return localStorage.getItem('kf-view') === 'workshop' ? 'workshop' : 'city';
+    return localStorage.getItem('kf-view') === 'city' ? 'city' : 'workshop';
   } catch {
-    return 'city';
+    return 'workshop';
   }
 }
 import { authenticate, connect, fetchFiles, fetchRole, type Link } from './net';
@@ -184,10 +184,8 @@ class App {
   private one(e: AgentEvent, live: boolean) {
     const b = e.body;
     const sub = e.parent !== null;
-    if (e.session && this.lastSession && e.session !== this.lastSession && b.type !== 'session_started') {
-      this.endStream();
-      this.divider(e.session, false);
-    }
+    // A switch of session only ends the current text block; the focus filter keeps the log to one session.
+    if (e.session && this.lastSession && e.session !== this.lastSession) this.endStream();
     if (e.session) this.lastSession = e.session;
     this.curSession = e.session;
     switch (b.type) {
@@ -600,7 +598,7 @@ async function main() {
   const canvas = $<HTMLCanvasElement>('sky');
   const scene: Stage = mode === 'workshop' ? new Workshop(canvas, hooks) : new Inside(canvas, hooks);
   const view = $('view');
-  view.textContent = mode === 'workshop' ? 'view: workshop' : 'view: city';
+  view.textContent = mode === 'workshop' ? 'view: warehouse' : 'view: city';
   view.addEventListener('click', () => {
     try {
       localStorage.setItem('kf-view', mode === 'workshop' ? 'city' : 'workshop');

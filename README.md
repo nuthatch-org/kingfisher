@@ -1,19 +1,16 @@
 # kingfisher
 
-A local, browser-based live view of coding agents at work. By default the agents work *inside*
-the project: the repository is a full-size city, a district per folder and a building per file,
-and each agent is a hover robot that flies to the building of the file it is reading or editing,
-unfolds a field workbench beside it, and shows what it sees or changes on a holo panel above the
-roof. Shell, web, MCP and helpers have landmarks on the outskirts, with benches, computers and
-scopes. The older workshop room is one click away (**view** in the footer). A Rust daemon on 127.0.0.1 owns the
-agent process, normalises its event stream, and feeds a 3D workshop in a browser tab: each agent
-is a small robot that walks to the bookshelf to read, the desk to edit, the terminal to run
-commands, and so on, while the project stands on a blueprint table in the middle of the room as a
-miniature city: a district per top-level folder, a building per file, height by size and colour by
-type. Reading a file lights its building and draws a beam to it, editing turns it amber, and a new
-file rises out of the ground. Helpers arrive through
-a portal, permission requests put a spotlight on the robot asking, and from the same page one can
-chat back, interrupt, and approve.
+A local, browser-based live view of coding agents at work, set in an industrial warehouse. Each
+agent is a hover robot that walks to the machine for what it is doing: the pallet racks to read
+(a crate comes down with the file's name on it), the assembly line of workbenches to edit, the
+server room to run commands, a scanning gantry to search, the comms station's dish for the web,
+the control panel for MCP, and the loading bay where helpers arrive. Robotic arms, a conveyor and
+an overhead crane speed up while work is under way. The project itself stands on a blueprint table
+in the middle of the hall as a miniature city, a building per file, lighting up as the agents touch
+it. Idle robots wait in the break room. **view** in the footer switches to the alternative, where
+the agents fly through the repository as a full-size city.
+
+From the same page one can chat back, interrupt, and approve permission requests.
 
 Runs Claude Code first, by spawning the unmodified official `claude` binary under the user's own
 login. kingfisher never reads, stores or forwards credentials. Other agents come later, through
