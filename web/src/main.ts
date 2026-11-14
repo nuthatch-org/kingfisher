@@ -1,5 +1,5 @@
 import './style.css';
-import { Observatory } from './scene';
+import { Workshop } from './workshop';
 import { authenticate, connect, fetchFiles, type Link } from './net';
 import { KIND_COLOR, KIND_GLYPH, TEST_COMMAND } from './palette';
 import type { AgentEvent, ToolKind } from './types';
@@ -59,7 +59,7 @@ class App {
   /** Set by main: an observed session living in another repository swaps the sky to it. */
   onCwd: (cwd: string) => void = () => {};
 
-  constructor(private scene: Observatory) {}
+  constructor(private scene: Workshop) {}
 
   bind(link: Link) {
     this.link = link;
@@ -129,7 +129,6 @@ class App {
     for (const p of this.perms.values()) p.remove();
     this.perms.clear();
     this.scene.reset();
-    this.scene.setWaiting(false);
   }
 
   // ------------------------------------------------------------------ reducer
@@ -176,10 +175,12 @@ class App {
           this.endStream();
           this.divider(e.session, observed, `${b.cwd.split('/').pop() || b.cwd} · ${b.permission_mode ?? 'default'} permissions`);
         }
+        if (!sub) this.scene.session(e.session, b.cwd);
         if (b.cwd && b.cwd.replace(/\/$/, '') !== this.root) this.onCwd(b.cwd);
         break;
       }
       case 'session_ended':
+        this.scene.sessionEnded(e.session);
         this.endStream();
         this.setBusy(false);
         this.notice(`session ended${b.reason ? ` (${b.reason})` : ''}`);
@@ -188,7 +189,7 @@ class App {
         this.perms.get(b.req_id)?.remove();
         this.perms.delete(b.req_id);
         this.notice('answered elsewhere');
-        this.scene.setWaiting(this.perms.size > 0);
+        this.scene.setWaiting(e.session, null, this.perms.size > 0);
         break;
       }
       case 'turn_started':
@@ -196,7 +197,7 @@ class App {
         this.entry('user', b.text);
         this.setBusy(true);
         this.river.append(el('span', 'turn'));
-        if (live) this.scene.turnStarted();
+        this.scene.turnStarted(e.session, b.text, live);
         break;
       case 'thinking_delta':
         if (!this.thinkEl) {
@@ -214,14 +215,14 @@ class App {
           this.thinkTokens = b.estimated_tokens;
           if (this.thinkSummary) this.thinkSummary.textContent = `thinking · ~${fmt(this.thinkTokens)} tokens`;
         }
-        if (live) this.scene.thinking();
+        if (live) this.scene.thinking(e.session, e.parent, this.thinkTokens);
         break;
       case 'text_delta':
         this.thinkEl = null;
         this.thinkBuf = '';
         if (!this.streamEl) this.streamEl = this.entry(sub ? 'agent sub' : 'agent', '');
         this.streamBuf += b.text;
-        if (live) this.scene.speaking();
+        if (live) this.scene.speaking(e.session, e.parent, this.streamBuf);
         break;
       case 'message_complete':
         if (this.streamEl) {
@@ -249,8 +250,10 @@ class App {
           list.push({ tool: b.tool, kind: b.kind, ok: null, ts: e.ts, row });
           this.touches.set(key, list);
         }
-        this.scene.toolCall(b.kind, b.paths, b.input, e.parent, live);
-        if (b.kind === 'agent' && live) this.scene.spawnMoon(b.call_id);
+        this.scene.toolCall(
+          { session: e.session, parent: e.parent, callId: b.call_id, kind: b.kind, tool: b.tool, input: b.input, paths: b.paths, label: describe(b.tool, b.input, this.root) },
+          live,
+        );
         break;
       }
       case 'tool_result': {
@@ -260,14 +263,15 @@ class App {
         t.tick.classList.add(b.ok ? 'ok' : 'err');
         if (live && t.test) b.ok ? this.sound.testsPassed() : this.sound.failure();
         else if (live && !b.ok) this.sound.failure();
-        const out = el('pre', 'result', b.summary || (b.ok ? '(no output)' : '(failed)'));
-        t.row.querySelector('.detail')?.append(out);
+        // A successful edit's result only repeats what the diff above already shows.
+        if (!(b.ok && (t.kind === 'edit' || t.kind === 'write'))) {
+          t.row.querySelector('.detail')?.append(el('pre', 'result', b.summary || (b.ok ? '(no output)' : '(failed)')));
+        }
         for (const p of t.paths) {
           const last = this.touches.get(this.rel(p))?.findLast((x) => x.row === t.row);
           if (last) last.ok = b.ok;
         }
-        if (t.kind === 'agent') this.scene.endMoon(b.call_id);
-        if (live) this.scene.toolResult(b.ok, t.kind, t.paths, t.test);
+        this.scene.toolResult(e.session, e.parent, b.call_id, b.ok, b.summary, t.test, live);
         break;
       }
       case 'usage':
@@ -291,11 +295,12 @@ class App {
         }
         this.gauges();
         this.setBusy(false);
+        this.scene.turnEnded(e.session, b.ok, live);
         if (live) this.sound.yourTurn();
         if (!b.ok) this.notice(`turn ended: ${b.reason ?? 'error'}`, 'warn');
         break;
       case 'permission_requested':
-        this.permission(b.req_id, b.tool, b.input);
+        this.permission(b.req_id, b.tool, b.input, e.session);
         if (live) this.sound.permission();
         break;
       case 'permission_resolved': {
@@ -303,7 +308,7 @@ class App {
         card?.remove();
         this.perms.delete(b.req_id);
         this.notice(`${b.allow ? 'allowed' : 'denied'}`, b.allow ? '' : 'warn');
-        this.scene.setWaiting(this.perms.size > 0);
+        this.scene.setWaiting(e.session, null, this.perms.size > 0);
         break;
       }
       case 'retry':
@@ -311,9 +316,10 @@ class App {
         break;
       case 'compaction':
         this.notice('context compacted');
-        if (live) this.scene.compaction();
+        if (live) this.scene.compaction(e.session);
         break;
       case 'agent_exited':
+        this.scene.sessionEnded(e.session);
         this.priorCost += this.processCost;
         this.processCost = 0;
         this.endStream();
@@ -415,7 +421,7 @@ class App {
     return t;
   }
 
-  private permission(reqId: string, tool: string, input: any) {
+  private permission(reqId: string, tool: string, input: any, session: string | null) {
     const card = el('div', 'perm');
     card.append(el('div', 'perm-title', `${tool} wants permission`));
     if (typeof input?.command === 'string') {
@@ -437,7 +443,7 @@ class App {
     card.append(actions);
     $('perms').append(card);
     this.perms.set(reqId, card);
-    this.scene.setWaiting(true);
+    this.scene.setWaiting(session, tool, true);
   }
 
   /** Sessions seen only through hooks: kingfisher can watch and approve them, not steer them. */
@@ -510,7 +516,7 @@ function describe(tool: string, input: any, root: string): string {
 async function main() {
   const tip = $('tip');
   let app: App;
-  const scene = new Observatory($<HTMLCanvasElement>('sky'), {
+  const scene = new Workshop($<HTMLCanvasElement>('sky'), {
     hover(path, x, y) {
       if (!path) {
         tip.classList.remove('show');
@@ -521,6 +527,7 @@ async function main() {
       tip.classList.add('show');
     },
     pick: (path) => app.showFile(path),
+    files: (n) => ($('files').textContent = `${n} files`),
   });
   app = new App(scene);
 
@@ -530,6 +537,7 @@ async function main() {
   });
   await authenticate().catch(() => false);
   await scene.start();
+  scene.placeholder();
   $('backend').textContent = scene.backend;
 
   const loadFiles = async (cwd?: string) => {
@@ -537,7 +545,6 @@ async function main() {
     if (cwd && !root) return;
     app.setRoot(root);
     scene.setFiles(root, files);
-    $('files').textContent = `${files.length} files`;
   };
   await loadFiles();
   app.onCwd = (cwd) => void loadFiles(cwd);
