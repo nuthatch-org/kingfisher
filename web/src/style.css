@@ -201,3 +201,5 @@ body.watch .brand::after { content: ' · watching'; color: var(--ink-dim); -webk
   .bot-bubble { max-width: 22ch; font-size: 11px; }
   #perms { top: 28vh; }
 }
+
+.district-label { padding: 0 6px; border-radius: 4px; background: rgba(6, 20, 40, 0.75); color: #9fd8ff; font-size: 10.5px; letter-spacing: 0.04em; white-space: nowrap; pointer-events: none; }

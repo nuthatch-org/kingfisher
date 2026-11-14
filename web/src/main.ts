@@ -573,10 +573,10 @@ async function main() {
   $('backend').textContent = scene.backend;
 
   const loadFiles = async (cwd?: string) => {
-    const { root, files } = await fetchFiles(cwd);
+    const { root, files, sizes } = await fetchFiles(cwd);
     if (cwd && !root) return;
     app.setRoot(root);
-    scene.setFiles(root, files);
+    scene.setFiles(root, files, sizes);
   };
   await loadFiles();
   app.onCwd = (cwd) => void loadFiles(cwd);

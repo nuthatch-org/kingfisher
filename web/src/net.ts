@@ -52,10 +52,11 @@ export function connect(handlers: {
   };
 }
 
-export async function fetchFiles(cwd?: string): Promise<{ root: string; files: string[] }> {
+export async function fetchFiles(cwd?: string): Promise<{ root: string; files: string[]; sizes: number[] }> {
   const res = await fetch(cwd ? `/api/files?cwd=${encodeURIComponent(cwd)}` : '/api/files');
-  if (!res.ok) return { root: '', files: [] };
-  return res.json();
+  if (!res.ok) return { root: '', files: [], sizes: [] };
+  const body = await res.json();
+  return { root: body.root, files: body.files, sizes: body.sizes ?? [] };
 }
 
 export async function fetchRole(): Promise<{ role: 'control' | 'watch'; phone: string | null }> {

@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { Sparks } from './fx';
+import { City } from './city';
 import { KIND_COLOR, KIND_GLYPH } from './palette';
 import type { ToolKind } from './types';
 
@@ -29,7 +30,7 @@ const STATIONS: Record<StationId, Station> = {
   switchboard: { stand: new THREE.Vector3(5.6, 0, 2), look: new THREE.Vector3(8, 1, 2) },
   lounge: { stand: new THREE.Vector3(-1.4, 0, 3.4), look: new THREE.Vector3(1, 0, 1) },
   door: { stand: new THREE.Vector3(4.6, 0, 4.6), look: new THREE.Vector3(4.6, 1, 0) },
-  floor: { stand: new THREE.Vector3(0, 0, 0), look: new THREE.Vector3(0, 1, -3) },
+  floor: { stand: new THREE.Vector3(0.8, 0, 2.3), look: new THREE.Vector3(0, 1, 0) },
 };
 
 const KIND_STATION: Record<ToolKind, StationId> = {
@@ -161,6 +162,7 @@ class Robot {
   pos = new THREE.Vector3();
   yaw = 0;
   target: THREE.Vector3 | null = null;
+  private waypoints: THREE.Vector3[] = [];
   targetLook: THREE.Vector3 | null = null;
   station: StationId = 'floor';
   queue: Task[] = [];
@@ -270,13 +272,15 @@ class Robot {
     const side = new THREE.Vector3().subVectors(st.look, st.stand).setY(0).normalize();
     const tangent = new THREE.Vector3(-side.z, 0, side.x);
     const offset = (this.slot % 2 ? 1 : -1) * Math.ceil(this.slot / 2) * 1.0;
-    this.target = st.stand.clone().addScaledVector(tangent, offset);
+    const goal = st.stand.clone().addScaledVector(tangent, offset);
+    this.waypoints = route(this.pos, goal);
+    this.target = this.waypoints.shift()!;
     this.targetLook = st.look.clone().addScaledVector(tangent, offset);
     this.station = id;
   }
 
   get arrived() {
-    return !this.target || this.pos.distanceTo(this.target) < 0.06;
+    return !this.waypoints.length && (!this.target || this.pos.distanceTo(this.target) < 0.06);
   }
 
   private drawFace() {
@@ -327,7 +331,10 @@ class Robot {
       const d = to.length();
       const hustle = 1 + Math.min(this.queue.length, 6) * 0.35;
       const step = Math.min(d, dt * 3.1 * hustle);
-      if (d > 0.05) {
+      if (d <= 0.05 && this.waypoints.length) {
+        this.target = this.waypoints.shift()!;
+        moving = true;
+      } else if (d > 0.05) {
         this.pos.addScaledVector(to.normalize(), step);
         this.yaw = turn(this.yaw, Math.atan2(to.x, to.z), dt * 9);
         moving = true;
@@ -396,6 +403,63 @@ class Robot {
   }
 }
 
+/** The blueprint table, in world space, grown by a robot's radius: robots route around it. */
+const TABLE = { x: -0.6, z: -0.3, w: 5.2, d: 3.4, h: 0.8 };
+const KEEP_OUT = { x0: TABLE.x - TABLE.w / 2 - 0.65, x1: TABLE.x + TABLE.w / 2 + 0.65, z0: TABLE.z - TABLE.d / 2 - 0.65, z1: TABLE.z + TABLE.d / 2 + 0.65 };
+
+function crossesTable(a: THREE.Vector3, b: THREE.Vector3): boolean {
+  // Liang–Barsky against the keep-out rectangle.
+  let t0 = 0;
+  let t1 = 1;
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const edges: [number, number][] = [
+    [-dx, a.x - KEEP_OUT.x0],
+    [dx, KEEP_OUT.x1 - a.x],
+    [-dz, a.z - KEEP_OUT.z0],
+    [dz, KEEP_OUT.z1 - a.z],
+  ];
+  for (const [p, q] of edges) {
+    if (p === 0) {
+      if (q < 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 > t1) return false;
+  }
+  return t1 - t0 > 0.001;
+}
+
+/** Straight there, or by one or two corners of the table when it is in the way. */
+function route(from: THREE.Vector3, to: THREE.Vector3): THREE.Vector3[] {
+  if (!crossesTable(from, to)) return [to];
+  const m = 0.05;
+  const corners = [
+    new THREE.Vector3(KEEP_OUT.x0 - m, 0, KEEP_OUT.z0 - m),
+    new THREE.Vector3(KEEP_OUT.x1 + m, 0, KEEP_OUT.z0 - m),
+    new THREE.Vector3(KEEP_OUT.x1 + m, 0, KEEP_OUT.z1 + m),
+    new THREE.Vector3(KEEP_OUT.x0 - m, 0, KEEP_OUT.z1 + m),
+  ];
+  let best: THREE.Vector3[] | null = null;
+  let bestLen = Infinity;
+  for (const c of corners) {
+    if (crossesTable(from, c) || crossesTable(c, to)) continue;
+    const len = from.distanceTo(c) + c.distanceTo(to);
+    if (len < bestLen) [best, bestLen] = [[c, to], len];
+  }
+  if (best) return best;
+  for (const c1 of corners) {
+    for (const c2 of corners) {
+      if (c1 === c2 || crossesTable(from, c1) || crossesTable(c1, c2) || crossesTable(c2, to)) continue;
+      const len = from.distanceTo(c1) + c1.distanceTo(c2) + c2.distanceTo(to);
+      if (len < bestLen) [best, bestLen] = [[c1, c2, to], len];
+    }
+  }
+  return best ?? [to];
+}
+
 function turn(from: number, to: number, k: number) {
   let d = to - from;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -436,14 +500,8 @@ export class Workshop {
   private robots = new Map<string, Robot>();
   private slots = 0;
   private root = '';
-  private files: string[] = [];
-  /** The file each book instance stands for; the shelf holds fewer books than a large repo has files. */
-  private bookFiles: string[] = [];
-  private books!: THREE.InstancedMesh;
-  private bookHeat: Float32Array = new Float32Array(0);
-  private bookEdited: Uint8Array = new Uint8Array(0);
-  private bookBase: THREE.Color[] = [];
-  private bookIndex = new Map<string, number>();
+  private city = new City(TABLE.w, TABLE.d, TABLE.h);
+  private beams: { mesh: THREE.Mesh; robot: Robot; to: THREE.Vector3; life: number }[] = [];
   private flying: { mesh: THREE.Mesh; from: THREE.Vector3; robot: Robot; t: number; label: CSS2DObject; back: boolean }[] = [];
 
   private deskScreen = new Screen(1.5, 0.9);
@@ -474,9 +532,9 @@ export class Workshop {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.camera = new THREE.PerspectiveCamera(30, 1, 0.1, 200);
-    this.camera.position.set(22, 19, 25);
+    this.camera.position.set(16.5, 15, 19);
     this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.target.set(0, 0.6, 0);
+    this.controls.target.set(-0.3, 0.6, -0.6);
     this.controls.enableDamping = true;
     this.controls.maxPolarAngle = Math.PI * 0.46;
     this.controls.minDistance = 8;
@@ -594,6 +652,11 @@ export class Workshop {
     this.box(16, 0.06, 0.06, trim, 0, 4.2, -6);
     this.box(0.06, 0.06, 12, trim, -8, 4.2, 0);
 
+    this.city.group.position.set(TABLE.x, 0, TABLE.z);
+    this.scene.add(this.city.group);
+    const holo = new THREE.PointLight('#4fb8ff', 3, 6, 1.6);
+    holo.position.set(TABLE.x, TABLE.h + 1.6, TABLE.z);
+    this.scene.add(holo);
     this.buildShelf();
     this.buildDesk();
     this.buildTerminal();
@@ -616,19 +679,27 @@ export class Workshop {
     this.scene.add(shelf);
     this.box(6.2, 3.6, 0.5, this.mat('#3b281d', 0.85), 0, 1.8, -0.05, shelf);
     for (let r = 0; r < 5; r++) this.box(6.2, 0.06, 0.55, wood, 0, 0.3 + r * 0.72, 0.05, shelf);
-    const books = new THREE.InstancedMesh(new THREE.BoxGeometry(0.11, 1, 0.38), new THREE.MeshStandardMaterial({ roughness: 0.6 }), 300);
+    // Scenery now: the project lives on the blueprint table.
+    const n = 230;
+    const books = new THREE.InstancedMesh(new THREE.BoxGeometry(0.11, 1, 0.38), new THREE.MeshStandardMaterial({ roughness: 0.6 }), n);
+    const m = new THREE.Matrix4();
+    for (let i = 0; i < n; i++) {
+      const p = this.bookSlot(i);
+      const h = 0.4 + Math.random() * 0.24;
+      m.compose(new THREE.Vector3(p.x, p.y + h / 2, p.z), new THREE.Quaternion(), new THREE.Vector3(1, h, 1));
+      books.setMatrixAt(i, m);
+      books.setColorAt(i, new THREE.Color().setHSL(Math.random(), 0.45, 0.32 + Math.random() * 0.15));
+    }
     books.castShadow = true;
-    books.count = 0;
     books.position.copy(shelf.position);
-    this.books = books;
     this.scene.add(books);
   }
 
   private bookSlot(i: number): THREE.Vector3 {
-    const perRow = 50;
+    const perRow = 46;
     const row = Math.floor(i / perRow);
     const col = i % perRow;
-    return new THREE.Vector3(-2.95 + col * 0.12, 0.33 + row * 0.72, 0.12);
+    return new THREE.Vector3(-2.75 + col * 0.12, 0.33 + row * 0.72, 0.12);
   }
 
   private buildDesk() {
@@ -807,59 +878,12 @@ export class Workshop {
     g.add(this.portal);
   }
 
-  // ---------------------------------------------------------------- files as books
+  // ---------------------------------------------------------------- the project, as a city
 
-  setFiles(root: string, files: string[]) {
+  setFiles(root: string, files: string[], sizes: number[] = []) {
     this.root = root.replace(/\/$/, '');
-    this.files = [...files].sort();
-    this.bookIndex.clear();
-    const shown = this.files.slice(0, this.books.instanceMatrix.count);
-    this.bookHeat = new Float32Array(this.books.instanceMatrix.count);
-    this.bookEdited = new Uint8Array(this.books.instanceMatrix.count);
-    this.bookBase = [];
-    this.bookFiles = [...shown];
-    shown.forEach((f, i) => this.placeBook(f, i));
-    this.books.count = shown.length;
-    this.paintBooks();
-    this.hooks.files(this.files.length);
-  }
-
-  private placeBook(f: string, i: number) {
-    const dir = f.includes('/') ? f.split('/')[0] : '.';
-    const hue = hash(dir);
-    this.bookBase[i] = new THREE.Color().setHSL(hue, 0.45, 0.4 + hash(f) * 0.12);
-    const h = 0.42 + hash(f + '#') * 0.22;
-    const p = this.bookSlot(i);
-    const m = new THREE.Matrix4().compose(new THREE.Vector3(p.x, p.y + h / 2, p.z), new THREE.Quaternion(), new THREE.Vector3(1, h, 1));
-    this.books.setMatrixAt(i, m);
-    this.bookIndex.set(f, i);
-  }
-
-  private addBook(rel: string): number | undefined {
-    const existing = this.bookIndex.get(rel);
-    if (existing !== undefined) return existing;
-    const i = this.books.count;
-    if (i >= this.books.instanceMatrix.count) return undefined;
-    this.files.push(rel);
-    this.bookFiles.push(rel);
-    this.placeBook(rel, i);
-    this.books.count = i + 1;
-    this.books.instanceMatrix.needsUpdate = true;
-    this.hooks.files(this.files.length);
-    return i;
-  }
-
-  private paintBooks() {
-    const c = new THREE.Color();
-    const amber = new THREE.Color('#ffb347');
-    for (let i = 0; i < this.books.count; i++) {
-      c.copy(this.bookBase[i]);
-      if (this.bookEdited[i]) c.lerp(amber, 0.7);
-      c.multiplyScalar(1 + this.bookHeat[i] * 4);
-      this.books.setColorAt(i, c);
-    }
-    if (this.books.instanceColor) this.books.instanceColor.needsUpdate = true;
-    this.books.instanceMatrix.needsUpdate = true;
+    this.city.setFiles(files, sizes);
+    this.hooks.files(this.city.count);
   }
 
   private rel(path: string): string | null {
@@ -869,8 +893,41 @@ export class Workshop {
     return null;
   }
 
-  private bookWorld(i: number): THREE.Vector3 {
-    return this.bookSlot(i).add(this.books.position).add(new THREE.Vector3(0, 0.3, 0));
+  private beam(r: Robot, to: THREE.Vector3, color: string) {
+    const mesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.025, 0.025, 1, 6, 1, true),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(2.2), transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    this.scene.add(mesh);
+    this.beams.push({ mesh, robot: r, to: to.clone(), life: 1.6 });
+  }
+
+  /** Light the files a tool is about and draw a beam from the robot to the first. */
+  private markFiles(r: Robot, t: Task) {
+    const color = KIND_COLOR[t.kind];
+    const files = t.file ? [t.file] : [];
+    if (t.kind === 'search') {
+      const dir = this.rel(typeof t.input?.path === 'string' ? t.input.path : '') ?? '';
+      let n = 0;
+      for (const f of this.cityFilesUnder(dir)) {
+        this.city.touch(f, color, 0.7);
+        if (n++ === 0) files.push(f);
+        if (n > 40) break;
+      }
+    }
+    for (const f of files) {
+      this.city.touch(f, color, 1.3);
+      const roof = this.city.roof(f);
+      if (roof) this.beam(r, roof, color);
+    }
+  }
+
+  private *cityFilesUnder(dir: string): Generator<string> {
+    for (const f of this.allFiles()) if (!dir || f.startsWith(dir.replace(/\/$/, '') + '/')) yield f;
+  }
+
+  private allFiles(): string[] {
+    return (this.city as any).buildings.map((b: { path: string }) => b.path);
   }
 
   // ---------------------------------------------------------------- agents
@@ -936,14 +993,10 @@ export class Workshop {
   toolCall(info: ToolCallInfo, live: boolean) {
     const paths = info.paths.map((p) => this.rel(p)).filter((p): p is string => p !== null);
     const file: string | null = paths[0] ?? null;
-    if (file && info.kind === 'write') this.addBook(file);
+    if (file && info.kind === 'write' && this.city.addFile(file)) this.hooks.files(this.city.count);
 
     if (!live) {
-      for (const p of paths) {
-        const i = this.bookIndex.get(p);
-        if (i !== undefined && (info.kind === 'edit' || info.kind === 'write')) this.bookEdited[i] = 1;
-      }
-      this.paintBooks();
+      if (info.kind === 'edit' || info.kind === 'write') for (const p of paths) this.city.edited(p, false);
       return;
     }
     const r = this.robotFor(info.session, info.parent);
@@ -1033,9 +1086,9 @@ export class Workshop {
       f.label.removeFromParent();
     }
     this.flying = [];
-    this.bookHeat.fill(0);
-    this.bookEdited.fill(0);
-    this.paintBooks();
+    for (const b of this.beams) b.mesh.removeFromParent();
+    this.beams = [];
+    this.city.resetActivity();
     this.waiting = false;
     this.placeholder();
     this.deskScreen.idle('editor · idle');
@@ -1054,15 +1107,9 @@ export class Workshop {
   private arrive(r: Robot, t: Task) {
     const color = new THREE.Color(KIND_COLOR[t.kind]);
     switch (t.kind) {
-      case 'read': {
-        const i = t.file ? this.bookIndex.get(t.file) : undefined;
-        if (i !== undefined) {
-          this.bookHeat[i] = 1;
-          this.paintBooks();
-          this.flyBook(i, r, t.file!);
-        }
+      case 'read':
+        if (t.file) this.flyBook(Math.floor(Math.random() * 230), r, t.file);
         break;
-      }
       case 'edit':
       case 'write': {
         this.busy.desk = 1;
@@ -1093,6 +1140,7 @@ export class Workshop {
         this.portalFlash();
         break;
     }
+    this.markFiles(r, t);
     this.sparks.burst(r.pos.clone().setY(1.1), color, 14, 2.5, 0.8, 0.22);
   }
 
@@ -1107,13 +1155,14 @@ export class Workshop {
     }
     const at = r.pos.clone().setY(1.2);
     if (t.test && t.ok) this.confetti(at.clone().setY(2.6));
-    else if (!t.ok) this.failure(r);
-    else if (t.kind === 'edit' || t.kind === 'write') {
-      const i = t.file ? this.bookIndex.get(t.file) : undefined;
-      if (i !== undefined) {
-        this.bookEdited[i] = 1;
-        this.bookHeat[i] = 1;
-        this.paintBooks();
+    else if (!t.ok) {
+      this.failure(r);
+      if (t.file) this.city.touch(t.file, '#ff3030', 2);
+    } else if (t.kind === 'edit' || t.kind === 'write') {
+      if (t.file) {
+        this.city.edited(t.file, true);
+        const roof = this.city.roof(t.file);
+        if (roof) this.sparks.burst(roof, new THREE.Color(KIND_COLOR[t.kind]), 30, 1.6, 1, 0.16);
       }
       this.sparks.burst(new THREE.Vector3(2.2, 1.1, -3.4), new THREE.Color(KIND_COLOR[t.kind]), 40, 4, 1.1, 0.3);
     }
@@ -1125,8 +1174,9 @@ export class Workshop {
   }
 
   private flyBook(i: number, r: Robot, file: string) {
-    const from = this.bookWorld(i);
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.1), new THREE.MeshStandardMaterial({ color: this.bookBase[i], emissive: this.bookBase[i], emissiveIntensity: 1.5 }));
+    const from = this.bookSlot(i).add(new THREE.Vector3(-4, 0.3, -5.75));
+    const tint = new THREE.Color().setHSL(Math.random(), 0.6, 0.55);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.1), new THREE.MeshStandardMaterial({ color: tint, emissive: tint, emissiveIntensity: 1.5 }));
     mesh.position.copy(from);
     this.scene.add(mesh);
     const el = document.createElement('div');
@@ -1212,14 +1262,23 @@ export class Workshop {
       return true;
     });
 
-    let dirty = false;
-    for (let i = 0; i < this.bookHeat.length; i++) {
-      if (this.bookHeat[i] > 0.001) {
-        this.bookHeat[i] *= Math.exp(-dt * 0.35);
-        dirty = true;
+    this.city.frame(dt);
+    const up = new THREE.Vector3(0, 1, 0);
+    this.beams = this.beams.filter((b) => {
+      b.life -= dt;
+      if (b.life <= 0) {
+        b.mesh.removeFromParent();
+        return false;
       }
-    }
-    if (dirty) this.paintBooks();
+      const from = b.robot.pos.clone().add(new THREE.Vector3(0, 1.3 * b.robot.scale, 0));
+      const dir = new THREE.Vector3().subVectors(b.to, from);
+      const len = dir.length();
+      b.mesh.position.copy(from).addScaledVector(dir, 0.5);
+      b.mesh.scale.set(1, len, 1);
+      b.mesh.quaternion.setFromUnitVectors(up, dir.normalize());
+      (b.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(0.9, b.life);
+      return true;
+    });
 
     // stations wind down
     for (const k of Object.keys(this.busy) as (keyof typeof this.busy)[]) this.busy[k] = Math.max(0, this.busy[k] - dt * 0.4);
@@ -1287,8 +1346,7 @@ export class Workshop {
     const r = this.canvas.getBoundingClientRect();
     this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     this.ray.setFromCamera(this.pointer, this.camera);
-    const hit = this.ray.intersectObject(this.books, false)[0];
-    return hit?.instanceId !== undefined ? (this.bookFiles[hit.instanceId] ?? null) : null;
+    return this.city.pick(this.ray);
   }
 
   private hoverQueued = false;

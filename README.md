@@ -3,7 +3,10 @@
 A local, browser-based live view of coding agents at work. A Rust daemon on 127.0.0.1 owns the
 agent process, normalises its event stream, and feeds a 3D workshop in a browser tab: each agent
 is a small robot that walks to the bookshelf to read, the desk to edit, the terminal to run
-commands, and so on, while the project fills the shelves as files appear. Helpers arrive through
+commands, and so on, while the project stands on a blueprint table in the middle of the room as a
+miniature city: a district per top-level folder, a building per file, height by size and colour by
+type. Reading a file lights its building and draws a beam to it, editing turns it amber, and a new
+file rises out of the ground. Helpers arrive through
 a portal, permission requests put a spotlight on the robot asking, and from the same page one can
 chat back, interrupt, and approve.
 
