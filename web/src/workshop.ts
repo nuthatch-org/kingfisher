@@ -938,6 +938,12 @@ export class Workshop {
   }
 
   private robotFor(session: string | null, parent: string | null): Robot {
+    // Daemon-made events (permission cards in archives) carry no session: they belong to
+    // whoever is already working, not to a new arrival.
+    if (!session && !parent) {
+      const main = [...this.robots.values()].reverse().find((x) => x.scale === 1 && !x.leaving);
+      if (main) return main;
+    }
     const key = parent ?? session ?? 'main';
     let r = this.robots.get(key);
     if (r) return r;
