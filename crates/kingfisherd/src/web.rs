@@ -19,7 +19,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::agent::{self, AgentCmd, AgentHandle, Launcher};
 use crate::archive;
-use crate::hub::{Hub, now_ms};
+use crate::hub::{ArchiveFile, Hub, now_ms};
 
 #[derive(RustEmbed)]
 #[folder = "../../web/dist"]
@@ -43,7 +43,7 @@ pub struct AppState {
     pub cwd: PathBuf,
     pub archive_dir: PathBuf,
     /// Opened on the first hook event, so a daemon that observes nothing leaves no empty file.
-    pub observed_archive: Mutex<Option<std::fs::File>>,
+    pub observed_archive: Mutex<Option<ArchiveFile>>,
 }
 
 impl AppState {
@@ -158,7 +158,7 @@ async fn session_events(
     }
 }
 
-fn archive_hook(s: &AppState, payload: &Value) {
+fn archive_hook(s: &AppState, payload: &Value) -> Option<ArchiveFile> {
     use std::io::Write;
     let mut file = s.observed_archive.lock().unwrap();
     if file.is_none() {
@@ -167,6 +167,7 @@ fn archive_hook(s: &AppState, payload: &Value) {
             .create(true)
             .append(true)
             .open(&path)
+            .map(|f| Arc::new(Mutex::new(f)))
             .map_err(|e| {
                 tracing::warn!(
                     "cannot archive observed sessions to {}: {e}",
@@ -175,12 +176,12 @@ fn archive_hook(s: &AppState, payload: &Value) {
             })
             .ok();
     }
-    if let Some(f) = file.as_mut() {
-        let line = json!({"ts": now_ms(), "hook": payload}).to_string();
-        if let Err(e) = writeln!(f, "{line}") {
-            tracing::warn!("observed archive write failed: {e}");
-        }
+    let f = file.clone()?;
+    let line = json!({"ts": now_ms(), "hook": payload}).to_string();
+    if let Err(e) = writeln!(f.lock().unwrap(), "{line}") {
+        tracing::warn!("observed archive write failed: {e}");
     }
+    Some(f)
 }
 
 #[derive(Deserialize)]
@@ -355,11 +356,14 @@ async fn hook_event(
     if s.hub.session(session).is_some_and(|i| i.owned) {
         return StatusCode::NO_CONTENT.into_response();
     }
-    archive_hook(&s, &body);
+    let file = archive_hook(&s, &body);
     let out = s.hooks.lock().unwrap().payload(&body);
     for b in out.bodies {
         if let (EventBody::SessionStarted { cwd, .. }, Some(id)) = (&b, &out.session) {
             s.hub.note_session(id, PathBuf::from(cwd), false);
+            if let Some(f) = &file {
+                s.hub.set_archive(id, f.clone());
+            }
         }
         s.hub.publish(out.session.clone(), None, b);
     }

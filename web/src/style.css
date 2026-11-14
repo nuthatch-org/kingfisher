@@ -163,3 +163,4 @@ body.replaying .brand::after { content: ' · replay'; color: #9a8cff; -webkit-te
   #perms { left: 50%; top: 25vh; width: calc(100vw - 32px); }
   .foot { display: none; }
 }
+body.replaying .perm button { pointer-events: none; opacity: 0.5; }

@@ -50,9 +50,6 @@ cards answered through the `PermissionRequest` HTTP hook, interrupt and resume; 
 observing a separately started session through hooks, approving its permission from the page,
 and taking it over. [docs/design-report.md](docs/design-report.md) is the founding research report.
 
-Replays do not show permission cards yet: the approval happens in the daemon and is not written
-to the agent's archive.
-
 Not yet verified: the sound (built, never heard), the hang watchdog (`--watchdog-secs`, default
 300; the hang it guards against was not reproduced), and how the scene performs on a large repo
 or on Linux.

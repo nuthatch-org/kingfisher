@@ -7,6 +7,7 @@ use kingfisher_events::{AgentEvent, EventBody, SCHEMA_VERSION};
 use tokio::sync::{broadcast, oneshot};
 
 pub type Frame = Arc<str>;
+pub type ArchiveFile = Arc<Mutex<std::fs::File>>;
 
 /// Holds every event of this daemon's life, so a browser that connects late, or reloads,
 /// is sent the whole session before going live.
@@ -17,6 +18,8 @@ pub struct Hub {
     sessions: Mutex<HashMap<String, SessionInfo>>,
     /// Directories of archived sessions, so a replay can draw its own repository.
     archived_cwds: Mutex<HashSet<PathBuf>>,
+    /// Each session's archive, so events the daemon makes itself (permission cards) are kept too.
+    archives: Mutex<HashMap<String, ArchiveFile>>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,10 +46,39 @@ impl Hub {
             permissions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             archived_cwds: Mutex::new(HashSet::new()),
+            archives: Mutex::new(HashMap::new()),
         })
     }
 
+    pub fn set_archive(&self, session: &str, file: ArchiveFile) {
+        self.archives
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), file);
+    }
+
+    fn archive_own_event(&self, session: &str, body: &EventBody) {
+        use std::io::Write;
+        let Some(file) = self.archives.lock().unwrap().get(session).cloned() else {
+            return;
+        };
+        let line = serde_json::json!({"ts": now_ms(), "kf": body}).to_string();
+        if let Err(e) = writeln!(file.lock().unwrap(), "{line}") {
+            tracing::warn!("archive write failed: {e}");
+        }
+    }
+
     pub fn publish(&self, session: Option<String>, parent: Option<String>, body: EventBody) {
+        if let Some(id) = &session
+            && matches!(
+                body,
+                EventBody::PermissionRequested { .. }
+                    | EventBody::PermissionResolved { .. }
+                    | EventBody::PermissionWithdrawn { .. }
+            )
+        {
+            self.archive_own_event(id, &body);
+        }
         let mut inner = self.inner.lock().unwrap();
         inner.seq += 1;
         let event = AgentEvent {

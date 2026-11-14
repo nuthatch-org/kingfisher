@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use kingfisher_events::{AgentEvent, ClaudeNormalizer, EventBody, HookNormalizer, SCHEMA_VERSION};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -52,6 +52,12 @@ pub fn events(text: &str) -> Vec<AgentEvent> {
             claude.value(raw)
         } else if let Some(hook) = v.get("hook") {
             hooks.payload(hook)
+        } else if let Some(Ok(body)) = v.get("kf").map(EventBody::deserialize) {
+            kingfisher_events::Normalized {
+                session: None,
+                parent: None,
+                bodies: vec![body],
+            }
         } else {
             continue;
         };
@@ -153,13 +159,16 @@ mod tests {
             "\n",
             r#"{"ts":1500,"raw":{"type":"user","isReplay":true,"session_id":"a","message":{"content":[{"type":"text","text":"go"}]}}}"#,
             "\n",
+            r#"{"ts":1700,"kf":{"type":"permission_requested","req_id":"r","tool":"Bash","input":{}}}"#,
+            "\n",
             r#"{"ts":2000,"hook":{"hook_event_name":"PreToolUse","session_id":"b","cwd":"/o","tool_name":"Read","tool_use_id":"t","tool_input":{"file_path":"/o/x"}}}"#,
             "\n",
             "not json\n",
         );
         let ev = events(text);
         let ts: Vec<i64> = ev.iter().map(|e| e.ts).collect();
-        assert_eq!(ts, vec![1000, 1500, 2000, 2000]);
+        assert_eq!(ts, vec![1000, 1500, 1700, 2000, 2000]);
+        assert!(matches!(ev[2].body, EventBody::PermissionRequested { .. }));
         let s = summarize("x.ndjson".into(), 1, text);
         assert_eq!(s.cwd.as_deref(), Some("/r"));
         assert_eq!(s.first_prompt.as_deref(), Some("go"));

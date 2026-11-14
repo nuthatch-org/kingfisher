@@ -7,12 +7,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use kingfisher_events::{ClaudeNormalizer, EventBody};
 use serde_json::json;
-use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
-use crate::hub::{Hub, now_ms};
+use crate::hub::{ArchiveFile, Hub, now_ms};
 
 /// Variables that would make the child think it is nested inside another Claude Code session,
 /// or make it bill an API key instead of the user's own subscription login.
@@ -305,12 +304,13 @@ async fn spawn(
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    let archive = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&cfg.archive)
-        .await
-        .with_context(|| format!("opening archive {}", cfg.archive.display()))?;
+    let archive: ArchiveFile = Arc::new(Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cfg.archive)
+            .with_context(|| format!("opening archive {}", cfg.archive.display()))?,
+    ));
 
     *activity.lock().unwrap() = Activity::new();
     tokio::spawn(read_stdout(
@@ -344,7 +344,7 @@ async fn spawn(
 
 async fn read_stdout(
     stdout: tokio::process::ChildStdout,
-    mut archive: File,
+    archive: ArchiveFile,
     hub: Arc<Hub>,
     tx: mpsc::Sender<AgentCmd>,
     generation: u64,
@@ -363,8 +363,11 @@ async fn read_stdout(
                     Ok(raw) => json!({"ts": now_ms(), "raw": raw}).to_string(),
                     Err(_) => json!({"ts": now_ms(), "text": line}).to_string(),
                 };
-                if let Err(e) = archive.write_all(format!("{record}\n").as_bytes()).await {
-                    tracing::warn!("archive write failed: {e}");
+                {
+                    use std::io::Write;
+                    if let Err(e) = writeln!(archive.lock().unwrap(), "{record}") {
+                        tracing::warn!("archive write failed: {e}");
+                    }
                 }
                 let out = normalizer.line(&line);
                 for body in out.bodies {
@@ -373,6 +376,7 @@ async fn read_stdout(
                         && let Some(id) = &out.session
                     {
                         hub.note_session(id, cwd.clone(), true);
+                        hub.set_archive(id, archive.clone());
                         let _ = tx.send(AgentCmd::SessionId(id.clone())).await;
                     }
                     hub.publish(out.session.clone(), out.parent.clone(), body);
@@ -385,6 +389,5 @@ async fn read_stdout(
             }
         }
     }
-    let _ = archive.flush().await;
     let _ = tx.send(AgentCmd::Exited(generation)).await;
 }
