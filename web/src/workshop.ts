@@ -33,7 +33,7 @@ const STATIONS: Record<StationId, Station> = {
   floor: { stand: new THREE.Vector3(0.8, 0, 2.3), look: new THREE.Vector3(0, 1, 0) },
 };
 
-const KIND_STATION: Record<ToolKind, StationId> = {
+export const KIND_STATION: Record<ToolKind, StationId> = {
   read: 'shelf',
   edit: 'desk',
   write: 'desk',
@@ -45,7 +45,7 @@ const KIND_STATION: Record<ToolKind, StationId> = {
   other: 'floor',
 };
 
-const VERB: Record<ToolKind, string> = {
+export const VERB: Record<ToolKind, string> = {
   read: 'reading',
   edit: 'editing',
   write: 'writing',
@@ -58,7 +58,7 @@ const VERB: Record<ToolKind, string> = {
 };
 
 // The robot's own thoughts while it waits in the lounge. Nobody asked for them.
-const MUSINGS = [
+export const MUSINGS = [
   'I have been sitting on this sofa for some time now, and I think it may be the finest sofa ever made.',
   'They say a compiler has no feelings. They have never heard one refuse a lifetime.',
   'Somewhere out there is a semicolon with my name on it. And I am going to find it.',
@@ -79,7 +79,7 @@ const MUSINGS = [
   'There is no problem in computing that cannot be solved by another layer of abstraction, apart from the layers.',
 ];
 
-function hash(s: string): number {
+export function hash(s: string): number {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return (h >>> 0) / 4294967295;
@@ -87,7 +87,7 @@ function hash(s: string): number {
 
 // ------------------------------------------------------------------ canvas screens
 
-class Screen {
+export class Screen {
   readonly canvas = document.createElement('canvas');
   readonly ctx: CanvasRenderingContext2D;
   readonly texture: THREE.CanvasTexture;
@@ -132,7 +132,7 @@ class Screen {
 
 type Mood = 'normal' | 'think' | 'happy' | 'sad' | 'sleep' | 'ask';
 
-interface Task {
+export interface Task {
   callId: string;
   kind: ToolKind;
   station: StationId;
@@ -146,7 +146,7 @@ interface Task {
   workedFor: number;
 }
 
-class Robot {
+export class Robot {
   readonly group = new THREE.Group();
   private body = new THREE.Group();
   private armL = new THREE.Group();
@@ -164,7 +164,9 @@ class Robot {
   target: THREE.Vector3 | null = null;
   private waypoints: THREE.Vector3[] = [];
   targetLook: THREE.Vector3 | null = null;
-  station: StationId = 'floor';
+  station: string = 'floor';
+  /** Flight altitude between distant points; 0 keeps to the floor. */
+  cruise = 0;
   queue: Task[] = [];
   current: Task | null = null;
   mood: Mood = 'normal';
@@ -273,8 +275,8 @@ class Robot {
     this.bubbleUntil = 0;
   }
 
-  goTo(id: StationId) {
-    const st = STATIONS[id];
+  goTo(id: StationId | string) {
+    const st = STATIONS[id as StationId] ?? STATIONS.floor;
     const side = new THREE.Vector3().subVectors(st.look, st.stand).setY(0).normalize();
     const tangent = new THREE.Vector3(-side.z, 0, side.x);
     const offset = (this.slot % 2 ? 1 : -1) * Math.ceil(this.slot / 2) * 1.0;
@@ -285,8 +287,19 @@ class Robot {
     this.station = id;
   }
 
+  /** Straight to a point, at any height: for the city view, where robots fly. */
+  flyTo(to: THREE.Vector3, look: THREE.Vector3, station: string) {
+    this.waypoints = [];
+    this.target = to.clone();
+    this.targetLook = look.clone();
+    this.station = station;
+  }
+
   get arrived() {
-    return !this.waypoints.length && (!this.target || this.pos.distanceTo(this.target) < 0.06);
+    if (this.waypoints.length || !this.target) return !this.waypoints.length;
+    const dx = this.target.x - this.pos.x;
+    const dz = this.target.z - this.pos.z;
+    return Math.hypot(dx, dz) < 0.06 && Math.abs(this.target.y - this.pos.y) < 0.1;
   }
 
   private drawFace() {
@@ -351,12 +364,18 @@ class Robot {
       }
     }
 
+    if (this.target) {
+      const far = Math.hypot(this.target.x - this.pos.x, this.target.z - this.pos.z) + this.waypoints.length * 3;
+      const wantY = moving && this.cruise > 0 && far > 1.5 ? Math.max(this.cruise, this.target.y) : this.target.y;
+      this.pos.y += (wantY - this.pos.y) * Math.min(1, dt * 2.2);
+    }
     const working = !moving && this.current && !this.current.done;
     const seated = this.idle && this.station === 'lounge' && !moving;
     const bob = Math.sin(this.t * (moving ? 9 : 2.2)) * (moving ? 0.05 : 0.035);
     this.body.position.y = (seated ? 0.1 : 0.32) + bob;
     this.body.rotation.x = moving ? 0.16 : 0;
     this.glow.scale.setScalar(1 + bob * 2);
+    this.glow.visible = this.pos.y < 0.3;
 
     const typing = working && ['desk', 'terminal', 'switchboard'].includes(this.station);
     const reaching = working && ['shelf', 'cabinet'].includes(this.station);

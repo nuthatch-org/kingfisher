@@ -1,6 +1,11 @@
 # kingfisher
 
-A local, browser-based live view of coding agents at work. A Rust daemon on 127.0.0.1 owns the
+A local, browser-based live view of coding agents at work. By default the agents work *inside*
+the project: the repository is a full-size city, a district per folder and a building per file,
+and each agent is a hover robot that flies to the building of the file it is reading or editing,
+unfolds a field workbench beside it, and shows what it sees or changes on a holo panel above the
+roof. Shell, web, MCP and helpers have landmarks on the outskirts, with benches, computers and
+scopes. The older workshop room is one click away (**view** in the footer). A Rust daemon on 127.0.0.1 owns the
 agent process, normalises its event stream, and feeds a 3D workshop in a browser tab: each agent
 is a small robot that walks to the bookshelf to read, the desk to edit, the terminal to run
 commands, and so on, while the project stands on a blueprint table in the middle of the room as a

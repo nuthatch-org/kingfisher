@@ -103,6 +103,39 @@ function hash(s: string): number {
 
 const CAPACITY = 24_000;
 
+export interface CityOptions {
+  /** A full-size city on the ground, rather than a model on a table. */
+  ground?: boolean;
+  heightScale?: number;
+  /** Street width between districts and blocks. */
+  gap?: number;
+  maxFoot?: number;
+}
+
+/** Lit windows for the full-size city, painted once. */
+function windowTexture(): { map: THREE.CanvasTexture; glow: THREE.CanvasTexture } {
+  const make = (lit: boolean) => {
+    const c = document.createElement('canvas');
+    c.width = 64;
+    c.height = 128;
+    const x = c.getContext('2d')!;
+    x.fillStyle = lit ? '#000000' : '#d8dce6';
+    x.fillRect(0, 0, 64, 128);
+    // Few, chunky windows: the texture stretches with each building's height.
+    for (let row = 0; row < 4; row++) {
+      for (let col = 0; col < 3; col++) {
+        const on = Math.random() < 0.6;
+        x.fillStyle = lit ? (on ? '#ffd9a0' : '#000000') : '#39404f';
+        x.fillRect(7 + col * 19, 10 + row * 29, 12, 16);
+      }
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return { map: make(false), glow: make(true) };
+}
+
 interface Building {
   path: string;
   base: THREE.Color;
@@ -128,11 +161,21 @@ export class City {
   readonly top: Rect;
   private districts = new Map<string, Rect>();
 
-  constructor(readonly width: number, readonly depth: number, readonly height: number) {
+  private opts: Required<CityOptions>;
+
+  constructor(readonly width: number, readonly depth: number, readonly height: number, opts: CityOptions = {}) {
+    this.opts = { ground: false, heightScale: 1, gap: 0.05, maxFoot: 99, ...opts };
     this.top = { x: -width / 2, z: -depth / 2, w: width, d: depth };
     const geo = new THREE.BoxGeometry(1, 1, 1);
     geo.translate(0, 0.5, 0);
-    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.1 }), CAPACITY);
+    let material: THREE.MeshStandardMaterial;
+    if (this.opts.ground) {
+      const { map, glow } = windowTexture();
+      material = new THREE.MeshStandardMaterial({ map, emissiveMap: glow, emissive: '#ffb860', emissiveIntensity: 0.9, roughness: 0.55, metalness: 0.15 });
+    } else {
+      material = new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.1 });
+    }
+    this.mesh = new THREE.InstancedMesh(geo, material, CAPACITY);
     // Fill the colour buffer before the first frame: a pipeline compiled without it ignores it.
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);
     const c = new THREE.Color('#ffffff');
@@ -145,7 +188,26 @@ export class City {
     this.mesh.receiveShadow = true;
     this.mesh.position.y = height + 0.06;
     this.plates.position.y = height + 0.055;
-    this.group.add(this.buildTable(), this.plates, this.mesh);
+    this.group.add(this.opts.ground ? this.buildGround() : this.buildTable(), this.plates, this.mesh);
+  }
+
+  private buildGround(): THREE.Group {
+    const g = new THREE.Group();
+    const ground = new THREE.Mesh(
+      new THREE.BoxGeometry(this.width + 16, 0.3, this.depth + 16),
+      new THREE.MeshStandardMaterial({ color: '#15161d', roughness: 0.95 }),
+    );
+    ground.position.y = -0.15;
+    ground.receiveShadow = true;
+    g.add(ground);
+    const kerb = new THREE.Mesh(
+      new THREE.BoxGeometry(this.width + 0.6, 0.06, this.depth + 0.6),
+      new THREE.MeshStandardMaterial({ color: '#232838', emissive: '#1a5fa0', emissiveIntensity: 0.3 }),
+    );
+    kerb.position.y = 0.03;
+    kerb.receiveShadow = true;
+    g.add(kerb);
+    return g;
   }
 
   private buildTable(): THREE.Group {
@@ -226,13 +288,14 @@ export class City {
     const districtItems = [...tree.entries()]
       .map(([key, blocks]) => ({ key, weight: [...blocks.values()].flat().reduce((a, f) => a + weight(f.size), 0) }))
       .sort((a, b) => b.weight - a.weight);
-    const pad = 0.04;
+    const pad = this.opts.gap;
     this.districts = squarify(districtItems, { x: this.top.x + pad, z: this.top.z + pad, w: this.top.w - 2 * pad, d: this.top.d - 2 * pad });
 
     for (const [top, rect] of this.districts) {
       const hue = hash(top);
+      const street = this.opts.gap;
       const plate = new THREE.Mesh(
-        new THREE.BoxGeometry(Math.max(0.01, rect.w - 0.05), 0.012, Math.max(0.01, rect.d - 0.05)),
+        new THREE.BoxGeometry(Math.max(0.01, rect.w - street), this.opts.ground ? 0.08 : 0.012, Math.max(0.01, rect.d - street)),
         new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(hue, 0.35, 0.16), emissive: new THREE.Color().setHSL(hue, 0.6, 0.12), roughness: 0.8 }),
       );
       plate.position.set(rect.x + rect.w / 2, 0, rect.z + rect.d / 2);
@@ -243,7 +306,8 @@ export class City {
       const blockItems = [...blocks.entries()]
         .map(([key, fs]) => ({ key, weight: fs.reduce((a, f) => a + weight(f.size), 0) }))
         .sort((a, b) => b.weight - a.weight);
-      const inner = { x: rect.x + 0.05, z: rect.z + 0.05, w: Math.max(0.01, rect.w - 0.1), d: Math.max(0.01, rect.d - 0.1) };
+      const g = this.opts.gap;
+      const inner = { x: rect.x + g, z: rect.z + g, w: Math.max(0.01, rect.w - 2 * g), d: Math.max(0.01, rect.d - 2 * g) };
       const blockRects = squarify(blockItems, inner);
       for (const [block, br] of blockRects) {
         const fs = blocks.get(block)!.sort((a, b) => a.path.localeCompare(b.path));
@@ -265,14 +329,14 @@ export class City {
     fs.forEach((f, i) => {
       const cx = r.x + (i % cols) * cw + cw / 2;
       const cz = r.z + Math.floor(i / cols) * cd + cd / 2;
-      this.addBuilding(f.path, f.size, new THREE.Vector3(cx, 0, cz), Math.min(cw, cd) * 0.72, 1);
+      this.addBuilding(f.path, f.size, new THREE.Vector3(cx, 0, cz), Math.min(this.opts.maxFoot, Math.min(cw, cd) * 0.72), 1);
     });
   }
 
   private addBuilding(path: string, size: number, pos: THREE.Vector3, foot: number, shown: number): number {
     if (this.buildings.length >= CAPACITY) return -1;
     const i = this.buildings.length;
-    const height = 0.03 + Math.min(0.75, Math.log2(1 + size) * 0.038) * (0.85 + hash(path) * 0.3);
+    const height = (0.03 + Math.min(0.75, Math.log2(1 + size) * 0.038) * (0.85 + hash(path) * 0.3)) * this.opts.heightScale;
     this.buildings.push({
       path,
       base: typeColor(path).multiplyScalar(0.8),
@@ -299,7 +363,7 @@ export class City {
       el.className = 'district-label';
       el.textContent = name === '·' ? '(root)' : name;
       const label = new CSS2DObject(el);
-      label.position.set(r.x + r.w / 2, this.height + 0.08, r.z + r.d / 2);
+      label.position.set(r.x + r.w / 2, this.height + (this.opts.ground ? 0.3 : 0.08), r.z + (this.opts.ground ? r.d : r.d / 2));
       this.group.add(label);
       this.labels.push(label);
     }
@@ -324,6 +388,29 @@ export class City {
 
   has(path: string) {
     return this.byPath.has(path);
+  }
+
+  paths(): string[] {
+    return this.buildings.map((b) => b.path);
+  }
+
+  /** Where a building stands in world space, how wide and how tall it is now. */
+  site(path: string): { base: THREE.Vector3; foot: number; height: number } | null {
+    const i = this.byPath.get(path);
+    if (i === undefined) return null;
+    const b = this.buildings[i];
+    return { base: this.group.localToWorld(b.pos.clone().setY(this.mesh.position.y)), foot: b.foot, height: b.height * Math.max(b.shown, 0.3) };
+  }
+
+  /** Centre of a top-level district, in world space. */
+  district(top: string): THREE.Vector3 | null {
+    const r = this.districts.get(top);
+    return r ? this.group.localToWorld(new THREE.Vector3(r.x + r.w / 2, 0, r.z + r.d / 2)) : null;
+  }
+
+  dispose() {
+    for (const l of this.labels) l.element.remove();
+    this.group.removeFromParent();
   }
 
   /** World position of the roof of a file's building. */

@@ -1,5 +1,17 @@
 import './style.css';
 import { Workshop } from './workshop';
+import { Inside } from './inside';
+
+type Stage = Workshop | Inside;
+
+/** Which scene to draw; the city is the default, the workshop the alternative. */
+function viewMode(): 'city' | 'workshop' {
+  try {
+    return localStorage.getItem('kf-view') === 'workshop' ? 'workshop' : 'city';
+  } catch {
+    return 'city';
+  }
+}
 import { authenticate, connect, fetchFiles, fetchRole, type Link } from './net';
 import { KIND_COLOR, KIND_GLYPH, TEST_COMMAND } from './palette';
 import type { AgentEvent, ToolKind } from './types';
@@ -84,7 +96,7 @@ class App {
     requestAnimationFrame(() => (this.log.scrollTop = this.log.scrollHeight));
   }
 
-  constructor(private scene: Workshop) {}
+  constructor(private scene: Stage) {}
 
   bind(link: Link) {
     this.link = link;
@@ -182,15 +194,21 @@ class App {
       case 'session_started': {
         // Hook-observed sessions carry no auth source; only stream-json sessions report one.
         const observed = b.api_key_source === null;
+        // With several sessions, the header describes the focused one.
+        const describes = !this.focused || !e.session || e.session === this.focused;
         if (e.session) {
           if (observed) this.observed.add(e.session);
           else this.observed.delete(e.session);
         }
-        $('model').textContent = b.model;
-        $('cwd').textContent = b.cwd.split('/').pop() || b.cwd;
-        $('cwd').title = b.cwd;
+        if (describes) {
+          $('model').textContent = b.model;
+          $('cwd').textContent = b.cwd.split('/').pop() || b.cwd;
+          $('cwd').title = b.cwd;
+        }
         const auth = $('auth');
-        if (observed) {
+        if (!describes) {
+          /* another session's details stay off the header */
+        } else if (observed) {
           auth.textContent = 'observed';
           auth.className = 'chip dim';
         } else {
@@ -564,8 +582,8 @@ function describe(tool: string, input: any, root: string): string {
 async function main() {
   const tip = $('tip');
   let app: App;
-  const scene = new Workshop($<HTMLCanvasElement>('sky'), {
-    hover(path, x, y) {
+  const hooks = {
+    hover(path: string | null, x: number, y: number) {
       if (!path) {
         tip.classList.remove('show');
         return;
@@ -574,10 +592,28 @@ async function main() {
       tip.style.transform = `translate(${x + 14}px, ${y + 10}px)`;
       tip.classList.add('show');
     },
-    pick: (path) => app.showFile(path),
-    focus: (session) => app.setFocus(session),
-    files: (n) => ($('files').textContent = `${n} files`),
+    pick: (path: string) => app.showFile(path),
+    focus: (session: string | null) => app.setFocus(session),
+    files: (n: number) => ($('files').textContent = `${n} files`),
+  };
+  const mode = viewMode();
+  const canvas = $<HTMLCanvasElement>('sky');
+  const scene: Stage = mode === 'workshop' ? new Workshop(canvas, hooks) : new Inside(canvas, hooks);
+  const view = $('view');
+  view.textContent = mode === 'workshop' ? 'view: workshop' : 'view: city';
+  view.addEventListener('click', () => {
+    try {
+      localStorage.setItem('kf-view', mode === 'workshop' ? 'city' : 'workshop');
+    } catch {
+      /* private window: the switch just will not stick */
+    }
+    location.reload();
   });
+  const cam = $('camera');
+  if (scene instanceof Inside) {
+    cam.hidden = false;
+    cam.addEventListener('click', () => (cam.textContent = scene.toggleFollow() ? 'camera: follow' : 'camera: free'));
+  }
   app = new App(scene);
 
   // A fresh link pasted into an open tab only changes the fragment, which does not reload the page.
