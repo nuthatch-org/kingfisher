@@ -597,6 +597,9 @@ export class Workshop {
   private trail!: THREE.Line;
   private trailPts: THREE.Vector3[] = [];
   private shipments: { mesh: THREE.Mesh; label: CSS2DObject; t: number }[] = [];
+  // The latest of everything, so the idle robots can talk about the actual project.
+  private last: { command?: string; output?: string; read?: string; edited?: string; commit?: string; failedCmd?: string } = {};
+  private touched = new Set<string>();
   private leds!: THREE.InstancedMesh;
   private telescope = new THREE.Group();
   private drawer!: THREE.Mesh;
@@ -1464,6 +1467,8 @@ export class Workshop {
     }
     this.cards.clear();
     this.stats = { reads: 0, edits: 0, adds: 0, dels: 0, commands: 0, passed: 0, failed: 0, commits: 0, turns: 0 };
+    this.last = {};
+    this.touched.clear();
     this.log = [];
     this.todos = [];
     this.trailPts = [];
@@ -1475,6 +1480,66 @@ export class Workshop {
     this.placeholder();
     this.deskScreen.idle('editor · idle');
     this.termScreen.lines('zsh', [{ text: '$ _', color: '#9dff8a' }]);
+  }
+
+  // ---------------------------------------------------------------- idle thoughts
+
+  /**
+   * Something absurd, but about this project: its files, its biggest file, its busiest folder,
+   * what was just run and what it said. Falls back to the general musings only when there is
+   * nothing yet to go on.
+   */
+  private musing(): string {
+    const c = this.city.census();
+    const s = this.stats;
+    const project = this.root.split('/').pop() || 'this project';
+    const pick = <T>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)];
+    const kb = (n: number) => (n > 1_000_000 ? `${(n / 1_000_000).toFixed(1)} MB` : `${Math.round(n / 1000)} KB`);
+    const dirs = [...c.byDir.entries()].sort((a, b) => b[1] - a[1]);
+    const exts = [...c.byExt.entries()].sort((a, b) => b[1] - a[1]);
+    const ideas: string[] = [];
+
+    if (c.biggest && c.biggest.size > 20_000) {
+      ideas.push(
+        `${c.biggest.path} is ${kb(c.biggest.size)}. That is not a file. That is a county.`,
+        `Nobody has ever read ${c.biggest.path} from top to bottom. Nobody who came back, anyway.`,
+      );
+    }
+    if (dirs.length) {
+      const [d, n] = dirs[0];
+      ideas.push(`${d}/ has ${n} files in it. I have been to ${[...this.touched].filter((f) => f.startsWith(d + '/')).length}. The rest, I assume, are haunted.`);
+      if (dirs.length > 3) {
+        const [small, k] = dirs[dirs.length - 1];
+        ideas.push(`Spare a thought for ${small}/, with its ${k} file${k === 1 ? '' : 's'}, watching ${d}/ get all the attention.`);
+      }
+    }
+    if (exts.length > 1) {
+      const [a, na] = exts[0];
+      const [b, nb] = exts[1];
+      ideas.push(`There are ${na} .${a} files in ${project} and ${nb} .${b} files. They have never once spoken.`);
+    }
+    ideas.push(`${project}: ${c.files} files, and every single one of them believes it is the main one.`);
+    if (this.last.command && this.last.output) {
+      ideas.push(`Earlier I ran \`${this.last.command}\` and it said "${this.last.output}". I think about that a lot.`);
+    }
+    if (this.last.failedCmd) ideas.push(`\`${this.last.failedCmd}\` failed earlier. We do not speak of it. I am speaking of it now. That was a mistake.`);
+    if (this.last.read) ideas.push(`I read ${this.last.read} earlier. I am still not over the first line.`);
+    if (this.last.edited) ideas.push(`I changed ${this.last.edited}. It looks exactly the same from here, which is the mark of true craftsmanship.`);
+    if (s.adds + s.dels > 0) {
+      ideas.push(`+${s.adds} −${s.dels} this session. Net, ${s.adds - s.dels} lines of pure, distilled ambition.`);
+    }
+    if (s.passed + s.failed > 0) {
+      ideas.push(
+        s.failed
+          ? `${s.passed} tests passed and ${s.failed} failed. I choose to remember only the first number.`
+          : `${s.passed} tests passed. Not one failed. I have never been so frightened.`,
+      );
+    }
+    if (this.last.commit) ideas.push(`We shipped "${this.last.commit}". It is out there now, somewhere, being a commit.`);
+    if (s.commands > 20) ideas.push(`${s.commands} commands this session. The terminal and I are no longer on speaking terms.`);
+
+    // Mostly the project; now and then, the general nonsense.
+    return ideas.length && Math.random() < 0.85 ? pick(ideas) : pick(MUSINGS);
   }
 
   // ---------------------------------------------------------------- the record of work
@@ -1524,6 +1589,17 @@ export class Workshop {
         if (ok && /\bgit\s+commit\b/.test(cmd)) s.commits++;
         break;
       }
+    }
+    const file = info.paths.map((p) => this.rel(p)).find((p): p is string => !!p);
+    if (file) this.touched.add(file);
+    if (info.kind === 'read' && file) this.last.read = file;
+    if ((info.kind === 'edit' || info.kind === 'write') && file && ok) this.last.edited = file;
+    if (info.kind === 'shell') {
+      this.last.command = cmd.split('\n')[0].slice(0, 60);
+      this.last.output = summary.split('\n').map((l) => l.trim()).filter(Boolean).pop()?.slice(0, 70);
+      if (!ok) this.last.failedCmd = this.last.command;
+      const msg = /\bgit\s+commit\b/.test(cmd) && ok ? commitMessage(cmd) : null;
+      if (msg) this.last.commit = msg;
     }
     this.log.push({ glyph: KIND_GLYPH[info.kind], text: `${info.tool} ${info.label}`.slice(0, 60), ok });
     if (this.log.length > 30) this.log.shift();
@@ -1771,7 +1847,7 @@ export class Workshop {
       const lounging = r.idle && r.station === 'lounge' && r.arrived && !r.current && !r.queue.length && !r.leaving;
       if (!lounging) r.nextMuse = Math.max(r.nextMuse, performance.now() + 12000);
       else if (performance.now() > r.nextMuse && !r.bubbleUntil) {
-        r.say(MUSINGS[Math.floor(Math.random() * MUSINGS.length)], 'note', 8);
+        r.say(this.musing(), 'note', 9);
         r.nextMuse = performance.now() + 25000 + Math.random() * 20000;
       }
       r.update(dt, this.sparks);

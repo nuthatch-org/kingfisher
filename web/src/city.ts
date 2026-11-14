@@ -138,6 +138,7 @@ function windowTexture(): { map: THREE.CanvasTexture; glow: THREE.CanvasTexture 
 
 interface Building {
   path: string;
+  size: number;
   base: THREE.Color;
   pos: THREE.Vector3;
   foot: number;
@@ -339,6 +340,7 @@ export class City {
     const height = (0.03 + Math.min(0.75, Math.log2(1 + size) * 0.038) * (0.85 + hash(path) * 0.3)) * this.opts.heightScale;
     this.buildings.push({
       path,
+      size,
       base: typeColor(path).multiplyScalar(0.8),
       pos,
       foot: Math.max(0.012, foot),
@@ -392,6 +394,21 @@ export class City {
 
   paths(): string[] {
     return this.buildings.map((b) => b.path);
+  }
+
+  /** Facts about the project, for a robot with time on its hands. */
+  census(): { files: number; biggest: { path: string; size: number } | null; byExt: Map<string, number>; byDir: Map<string, number> } {
+    const byExt = new Map<string, number>();
+    const byDir = new Map<string, number>();
+    let biggest: { path: string; size: number } | null = null;
+    for (const b of this.buildings) {
+      const ext = b.path.includes('.') ? b.path.split('.').pop()! : '';
+      if (ext && ext.length <= 6) byExt.set(ext, (byExt.get(ext) ?? 0) + 1);
+      const dir = b.path.includes('/') ? b.path.split('/')[0] : '';
+      if (dir) byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+      if (!biggest || b.size > biggest.size) biggest = { path: b.path, size: b.size };
+    }
+    return { files: this.buildings.length, biggest, byExt, byDir };
   }
 
   /** Where a building stands in world space, how wide and how tall it is now. */
