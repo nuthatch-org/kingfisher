@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::agent::{self, AgentCmd, AgentHandle, Launcher};
-use crate::hub::Hub;
+use crate::archive;
+use crate::hub::{Hub, now_ms};
 
 #[derive(RustEmbed)]
 #[folder = "../../web/dist"]
@@ -40,6 +41,9 @@ pub struct AppState {
     pub token: String,
     pub hook_token: String,
     pub cwd: PathBuf,
+    pub archive_dir: PathBuf,
+    /// Opened on the first hook event, so a daemon that observes nothing leaves no empty file.
+    pub observed_archive: Mutex<Option<std::fs::File>>,
 }
 
 impl AppState {
@@ -59,6 +63,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/auth", post(auth))
         .route("/api/files", get(files))
+        .route("/api/sessions", get(sessions))
+        .route("/api/sessions/{name}", get(session_events))
         .route("/ws", get(ws))
         .route("/hook/permission", post(hook_permission))
         .route("/hook/event", post(hook_event))
@@ -118,6 +124,63 @@ async fn auth(
         s.token
     );
     ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
+}
+
+async fn sessions(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !authed(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let dir = s.archive_dir.clone();
+    let list = tokio::task::spawn_blocking(move || archive::list(&dir))
+        .await
+        .unwrap_or_default();
+    for cwd in list.iter().filter_map(|x| x.cwd.as_ref()) {
+        s.hub.allow_archived_cwd(PathBuf::from(cwd));
+    }
+    axum::Json(list).into_response()
+}
+
+async fn session_events(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if !authed(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !archive::valid_name(&name) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let dir = s.archive_dir.clone();
+    match tokio::task::spawn_blocking(move || archive::load(&dir, &name)).await {
+        Ok(Ok(events)) => axum::Json(events).into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn archive_hook(s: &AppState, payload: &Value) {
+    use std::io::Write;
+    let mut file = s.observed_archive.lock().unwrap();
+    if file.is_none() {
+        let path = s.archive_dir.join(format!("observed-{}.ndjson", now_ms()));
+        *file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| {
+                tracing::warn!(
+                    "cannot archive observed sessions to {}: {e}",
+                    path.display()
+                )
+            })
+            .ok();
+    }
+    if let Some(f) = file.as_mut() {
+        let line = json!({"ts": now_ms(), "hook": payload}).to_string();
+        if let Err(e) = writeln!(f, "{line}") {
+            tracing::warn!("observed archive write failed: {e}");
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -292,6 +355,7 @@ async fn hook_event(
     if s.hub.session(session).is_some_and(|i| i.owned) {
         return StatusCode::NO_CONTENT.into_response();
     }
+    archive_hook(&s, &body);
     let out = s.hooks.lock().unwrap().payload(&body);
     for b in out.bodies {
         if let (EventBody::SessionStarted { cwd, .. }, Some(id)) = (&b, &out.session) {
@@ -443,6 +507,8 @@ mod tests {
             token: "t0k".into(),
             hook_token: "h00k".into(),
             cwd: ".".into(),
+            archive_dir: std::env::temp_dir().join("kingfisher-test-archive"),
+            observed_archive: Mutex::new(None),
         }))
     }
 
@@ -531,6 +597,8 @@ mod tests {
             token: "t0k".into(),
             hook_token: "h00k".into(),
             cwd: ".".into(),
+            archive_dir: std::env::temp_dir().join("kingfisher-test-archive"),
+            observed_archive: Mutex::new(None),
         });
         let (_, mut live) = hub.snapshot_and_subscribe();
         let r = req(
@@ -567,6 +635,8 @@ mod tests {
             token: "t0k".into(),
             hook_token: "h00k".into(),
             cwd: ".".into(),
+            archive_dir: std::env::temp_dir().join("kingfisher-test-archive"),
+            observed_archive: Mutex::new(None),
         })
     }
 

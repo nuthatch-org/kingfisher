@@ -1,4 +1,5 @@
 mod agent;
+mod archive;
 mod hub;
 mod install;
 mod replay;
@@ -132,6 +133,10 @@ async fn main() -> Result<()> {
     let hook_token = hook_token()?;
     let hub = hub::Hub::new();
     let global_hooks = install::has_global_permission_hook(cli.port);
+    let archive_dir = archive::default_dir();
+    std::fs::create_dir_all(&archive_dir)
+        .with_context(|| format!("creating {}", archive_dir.display()))?;
+    tracing::info!("archiving to {}", archive_dir.display());
 
     let launcher = match &cli.replay {
         Some(path) => {
@@ -143,25 +148,17 @@ async fn main() -> Result<()> {
             });
             None
         }
-        None => {
-            let archive_dir = dirs::data_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join("kingfisher/sessions");
-            std::fs::create_dir_all(&archive_dir)
-                .with_context(|| format!("creating {}", archive_dir.display()))?;
-            tracing::info!("archiving to {}", archive_dir.display());
-            Some(agent::Launcher {
-                claude: cli.claude.clone(),
-                hook_url: install::permission_url(cli.port),
-                hook_token: hook_token.clone(),
-                keep_api_key: cli.keep_api_key,
-                permission_mode: cli.permission_mode.clone(),
-                extra_args: cli.claude_args.clone(),
-                archive_dir,
-                watchdog: (cli.watchdog_secs > 0).then(|| Duration::from_secs(cli.watchdog_secs)),
-                global_permission_hook: global_hooks,
-            })
-        }
+        None => Some(agent::Launcher {
+            claude: cli.claude.clone(),
+            hook_url: install::permission_url(cli.port),
+            hook_token: hook_token.clone(),
+            keep_api_key: cli.keep_api_key,
+            permission_mode: cli.permission_mode.clone(),
+            extra_args: cli.claude_args.clone(),
+            archive_dir: archive_dir.clone(),
+            watchdog: (cli.watchdog_secs > 0).then(|| Duration::from_secs(cli.watchdog_secs)),
+            global_permission_hook: global_hooks,
+        }),
     };
     let agent = match &launcher {
         Some(l) if !cli.observe => Some(agent::start(
@@ -187,6 +184,8 @@ async fn main() -> Result<()> {
         token: token.clone(),
         hook_token,
         cwd,
+        archive_dir,
+        observed_archive: Mutex::new(None),
     });
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, cli.port));
     let listener = tokio::net::TcpListener::bind(addr)

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +15,8 @@ pub struct Hub {
     tx: broadcast::Sender<Frame>,
     permissions: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     sessions: Mutex<HashMap<String, SessionInfo>>,
+    /// Directories of archived sessions, so a replay can draw its own repository.
+    archived_cwds: Mutex<HashSet<PathBuf>>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +42,7 @@ impl Hub {
             tx,
             permissions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            archived_cwds: Mutex::new(HashSet::new()),
         })
     }
 
@@ -109,6 +112,11 @@ impl Hub {
 
     pub fn is_known_cwd(&self, cwd: &std::path::Path) -> bool {
         self.sessions.lock().unwrap().values().any(|s| s.cwd == cwd)
+            || self.archived_cwds.lock().unwrap().contains(cwd)
+    }
+
+    pub fn allow_archived_cwd(&self, cwd: PathBuf) {
+        self.archived_cwds.lock().unwrap().insert(cwd);
     }
 }
 

@@ -15,6 +15,7 @@
       <span class="chip dim" id="model">no session yet</span>
       <span class="chip" id="auth">auth ?</span>
       <span class="chip" id="state">idle</span>
+      <button class="chip" id="library-btn" type="button">library</button>
       <span class="spacer"></span>
       <div class="gauge" title="context in use">
         <span class="label">context</span>
@@ -38,6 +39,25 @@
 
     <div id="river" title="every tool call this session; click one to find it"></div>
     <div id="perms"></div>
+
+    <section id="library">
+      <div class="drawer-head"><span>session library</span><button id="library-close" type="button">×</button></div>
+      <div id="library-body"></div>
+    </section>
+
+    <div id="player">
+      <button id="pexit" type="button" title="back to the live session">◀ live</button>
+      <button id="pplay" type="button">▶</button>
+      <select id="pspeed">
+        <option value="1">1×</option>
+        <option value="4" selected>4×</option>
+        <option value="16">16×</option>
+        <option value="64">64×</option>
+      </select>
+      <input id="scrub" type="range" min="0" max="1" value="0" step="1" />
+      <span id="ptime">0:00</span>
+      <span id="pname"></span>
+    </div>
 
     <section id="drawer">
       <div class="drawer-head"><span id="drawer-title"></span><button id="drawer-close" type="button">×</button></div>

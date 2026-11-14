@@ -5,6 +5,7 @@ import { KIND_COLOR, KIND_GLYPH, TEST_COMMAND } from './palette';
 import type { AgentEvent, ToolKind } from './types';
 import { editsOf, renderDiff } from './diff';
 import { Sonifier } from './sound';
+import { Player, listSessions, type Session } from './player';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const el = (tag: string, cls?: string, text?: string) => {
@@ -115,6 +116,16 @@ class App {
     this.river.replaceChildren();
     this.lastSession = null;
     this.priorCost = this.processCost = 0;
+    this.contextTokens = this.contextWindow = 0;
+    $('ctx-fill').style.width = '0';
+    $('ctx').textContent = '–';
+    $('cost').textContent = '–';
+    $('model').textContent = 'no session yet';
+    $('cwd').textContent = '…';
+    $('auth').textContent = 'auth ?';
+    $('auth').className = 'chip';
+    this.observed.clear();
+    this.setBusy(false);
     for (const p of this.perms.values()) p.remove();
     this.perms.clear();
     this.scene.reset();
@@ -538,8 +549,48 @@ async function main() {
   };
   requestAnimationFrame(decay);
 
+  // The live log is kept even while replaying, so leaving a replay restores the present exactly.
+  let liveLog: AgentEvent[] = [];
+  let replaying = false;
+  const player = new Player(
+    (events, instant) => app.apply(events, instant),
+    (vt, duration, playing) => {
+      const scrub = $<HTMLInputElement>('scrub');
+      scrub.max = String(Math.max(1, duration));
+      if (document.activeElement !== scrub) scrub.value = String(vt);
+      $('ptime').textContent = `${clock(vt)} / ${clock(duration)}`;
+      $('pplay').textContent = playing ? '❚❚' : '▶';
+    },
+  );
+  const enterReplay = async (s: Session) => {
+    replaying = true;
+    document.body.classList.add('replaying');
+    $('library').classList.remove('open');
+    $('pname').textContent = `${s.cwd?.split('/').pop() ?? '?'} · ${s.started ? new Date(s.started).toLocaleString() : ''}`;
+    if (!(await player.load(s.name))) leaveReplay();
+  };
+  const leaveReplay = () => {
+    player.stop();
+    replaying = false;
+    document.body.classList.remove('replaying');
+    void loadFiles().then(() => app.apply(liveLog, true));
+  };
+  $('pplay').addEventListener('click', () => (player.playing ? player.pause() : player.play()));
+  $('pexit').addEventListener('click', leaveReplay);
+  $<HTMLSelectElement>('pspeed').addEventListener('change', (e) => (player.speed = Number((e.target as HTMLSelectElement).value)));
+  $<HTMLInputElement>('scrub').addEventListener('input', (e) => player.seek(Number((e.target as HTMLInputElement).value)));
+  $('library-btn').addEventListener('click', async () => {
+    const panel = $('library');
+    if (panel.classList.toggle('open')) renderLibrary(await listSessions(), enterReplay);
+  });
+  $('library-close').addEventListener('click', () => $('library').classList.remove('open'));
+
   const link = connect({
-    events: (events, backlog) => app.apply(events, backlog),
+    events: (events, backlog) => {
+      if (backlog) liveLog = events;
+      else liveLog.push(...events);
+      if (!replaying) app.apply(events, backlog);
+    },
     status(up, ever) {
       const c = $('conn');
       c.textContent = up ? 'live' : ever ? 'reconnecting' : 'not connected: open the link kingfisherd printed';
@@ -547,6 +598,31 @@ async function main() {
     },
   });
   app.bind(link);
+}
+
+function clock(ms: number) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function renderLibrary(list: Session[], open: (s: Session) => void) {
+  const body = $('library-body');
+  body.replaceChildren();
+  if (!list.length) body.append(el('div', 'muted', 'No archived sessions yet.'));
+  for (const s of list) {
+    const row = el('div', 'lib-row');
+    const when = s.started ? new Date(s.started) : null;
+    const mins = s.started && s.ended ? Math.max(1, Math.round((s.ended - s.started) / 60000)) : 0;
+    const head = el('div', 'lib-head');
+    head.append(
+      el('span', 'lib-repo', s.cwd?.split('/').pop() ?? '?'),
+      el('span', 'lib-when', when ? when.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ''),
+    );
+    const meta = el('div', 'lib-meta', `${mins} min · ${s.tool_calls} tool calls · ${(s.bytes / 1024).toFixed(0)} KB${s.observed ? ' · observed' : ''}`);
+    row.append(head, el('div', 'lib-prompt', s.first_prompt ?? '(no prompt)'), meta);
+    row.addEventListener('click', () => open(s));
+    body.append(row);
+  }
 }
 
 main().catch((e) => {

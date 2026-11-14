@@ -19,9 +19,12 @@ It prints `http://127.0.0.1:7777/#t=<token>` and opens it. The token rides in th
 traded for an HttpOnly cookie on first load. `ANTHROPIC_API_KEY` is removed from the agent's
 environment so the session runs on your own `claude` login; `--keep-api-key` opts out.
 
-`--replay <file>` plays back a session archive (written to the platform data dir under
-`kingfisher/sessions/`) or a bare `claude -p --output-format stream-json` capture, without
-spending anything. Anything after `--` goes to `claude`.
+Every session is archived under the platform data dir in `kingfisher/sessions/`, observed ones
+included. **library** in the top bar lists them; picking one replays it through the same scene and
+transcript, with play, pause, 1× to 64× and a scrub bar. Idle gaps are squeezed to 2.5 s. Leaving
+the replay returns to the live session where it was. `--replay <file>` does the same from the
+command line, and also takes a bare `claude -p --output-format stream-json` capture. Anything
+after `--` goes to `claude`.
 
 ### Watching sessions you started yourself
 
@@ -47,6 +50,9 @@ cards answered through the `PermissionRequest` HTTP hook, interrupt and resume; 
 observing a separately started session through hooks, approving its permission from the page,
 and taking it over. [docs/design-report.md](docs/design-report.md) is the founding research report.
 
+Replays do not show permission cards yet: the approval happens in the daemon and is not written
+to the agent's archive.
+
 Not yet verified: the sound (built, never heard), the hang watchdog (`--watchdog-secs`, default
 300; the hang it guards against was not reproduced), and how the scene performs on a large repo
 or on Linux.
@@ -67,7 +73,7 @@ Found in testing, against the report:
 | Milestone | Scope |
 |---|---|
 | Weekend MVP | Daemon spawns `claude -p` in bidirectional stream-json; `PermissionRequest` HTTP hook for approvals; cosmic scene, transcript panel, chat, interrupt; NDJSON archive and replay |
-| v0.2 | Done: global hooks to observe hand-started sessions; take over via `--resume`; timeline strip, diffs, sound, hang watchdog. Left: terminal pane, session library and scrubbing replay |
+| v0.2 | Done: global hooks to observe hand-started sessions; take over via `--resume`; timeline strip, diffs, sound, hang watchdog. Session library with scrubbing replay. Left: terminal pane |
 | v0.3 | ACP and Codex adapters; multi-session; more themes; optional OTLP receiver |
 
 ## Before any public release
