@@ -52,7 +52,7 @@ fn basic_turn_from_a_real_capture() {
             (
                 "Read",
                 ToolKind::Read,
-                vec!["/Users/pepe/Projects/kingfisher/README.md".to_string()]
+                vec!["/Users/dev/Projects/kingfisher/README.md".to_string()]
             ),
             ("Bash", ToolKind::Shell, vec![]),
         ]
