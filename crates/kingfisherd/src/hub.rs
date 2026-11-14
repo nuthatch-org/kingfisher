@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,14 @@ pub struct Hub {
     inner: Mutex<Inner>,
     tx: broadcast::Sender<Frame>,
     permissions: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    sessions: Mutex<HashMap<String, SessionInfo>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionInfo {
+    pub cwd: PathBuf,
+    /// Started by this daemon, so its stream-json already covers what its hooks would report.
+    pub owned: bool,
 }
 
 struct Inner {
@@ -30,6 +39,7 @@ impl Hub {
             }),
             tx,
             permissions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -76,8 +86,29 @@ impl Hub {
         }
     }
 
-    pub fn forget_permission(&self, req_id: &str) {
-        self.permissions.lock().unwrap().remove(req_id);
+    /// Returns true if it was still waiting.
+    pub fn forget_permission(&self, req_id: &str) -> bool {
+        self.permissions.lock().unwrap().remove(req_id).is_some()
+    }
+
+    pub fn pending_permissions(&self) -> usize {
+        self.permissions.lock().unwrap().len()
+    }
+
+    pub fn note_session(&self, id: &str, cwd: PathBuf, owned: bool) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let entry = sessions
+            .entry(id.to_owned())
+            .or_insert(SessionInfo { cwd, owned });
+        entry.owned |= owned;
+    }
+
+    pub fn session(&self, id: &str) -> Option<SessionInfo> {
+        self.sessions.lock().unwrap().get(id).cloned()
+    }
+
+    pub fn is_known_cwd(&self, cwd: &std::path::Path) -> bool {
+        self.sessions.lock().unwrap().values().any(|s| s.cwd == cwd)
     }
 }
 

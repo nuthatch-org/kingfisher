@@ -36,6 +36,8 @@ export type EventBody =
     }
   | { type: 'permission_requested'; req_id: string; tool: string; input: any }
   | { type: 'permission_resolved'; req_id: string; allow: boolean }
+  | { type: 'permission_withdrawn'; req_id: string }
+  | { type: 'session_ended'; reason: string | null }
   | { type: 'agent_exited'; code: number | null }
   | { type: 'notice'; text: string }
   | { type: 'unknown'; raw_type: string };
@@ -52,4 +54,5 @@ export interface AgentEvent {
 export type ClientMsg =
   | { type: 'prompt'; text: string }
   | { type: 'interrupt' }
-  | { type: 'permission'; req_id: string; allow: boolean };
+  | { type: 'permission'; req_id: string; allow: boolean }
+  | { type: 'take_over'; session: string };

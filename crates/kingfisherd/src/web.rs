@@ -1,23 +1,23 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
-use kingfisher_events::EventBody;
+use kingfisher_events::{EventBody, HookNormalizer};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::agent::{AgentCmd, AgentHandle};
+use crate::agent::{self, AgentCmd, AgentHandle, Launcher};
 use crate::hub::Hub;
 
 #[derive(RustEmbed)]
@@ -32,7 +32,10 @@ const PERMISSION_WAIT: Duration = Duration::from_secs(590);
 
 pub struct AppState {
     pub hub: Arc<Hub>,
-    pub agent: Option<AgentHandle>,
+    pub agent: Mutex<Option<AgentHandle>>,
+    /// `None` in replay mode, where nothing may be started.
+    pub launcher: Option<Launcher>,
+    pub hooks: Mutex<HookNormalizer>,
     pub port: u16,
     pub token: String,
     pub hook_token: String,
@@ -58,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/files", get(files))
         .route("/ws", get(ws))
         .route("/hook/permission", post(hook_permission))
+        .route("/hook/event", post(hook_event))
         .fallback(get(asset))
         .layer(middleware::from_fn_with_state(state.clone(), guard_host))
         .with_state(state)
@@ -116,13 +120,28 @@ async fn auth(
     ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
 }
 
-async fn files(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Deserialize)]
+struct FilesQuery {
+    cwd: Option<PathBuf>,
+}
+
+async fn files(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<FilesQuery>,
+) -> Response {
     if !authed(&s, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    // Only directories a session has reported, never an arbitrary path from the page.
+    let root = match q.cwd {
+        Some(cwd) if s.hub.is_known_cwd(&cwd) => cwd,
+        Some(_) => return StatusCode::FORBIDDEN.into_response(),
+        None => s.cwd.clone(),
+    };
     let out = tokio::process::Command::new("git")
         .arg("-C")
-        .arg(&s.cwd)
+        .arg(&root)
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
         .output()
         .await;
@@ -134,7 +153,7 @@ async fn files(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
             .collect(),
         _ => vec![],
     };
-    axum::Json(json!({"root": s.cwd, "files": files})).into_response()
+    axum::Json(json!({"root": root, "files": files})).into_response()
 }
 
 async fn ws(State(s): State<Arc<AppState>>, headers: HeaderMap, up: WebSocketUpgrade) -> Response {
@@ -153,6 +172,34 @@ enum ClientMsg {
     Prompt { text: String },
     Interrupt,
     Permission { req_id: String, allow: bool },
+    TakeOver { session: String },
+}
+
+fn current_agent(s: &AppState) -> Option<AgentHandle> {
+    s.agent.lock().unwrap().clone()
+}
+
+fn take_over(s: &AppState, session: &str) {
+    let Some(launcher) = &s.launcher else {
+        return s.hub.notice("replay mode: nothing to take over with");
+    };
+    let mut agent = s.agent.lock().unwrap();
+    if agent.is_some() {
+        return s
+            .hub
+            .notice("already driving a session; start another kingfisherd to take over this one");
+    }
+    let Some(info) = s.hub.session(session) else {
+        return s.hub.notice(format!("unknown session {session}"));
+    };
+    s.hub.notice(format!(
+        "taking over {}; close it in the terminal first, two writers on one session is untested",
+        &session[..session.len().min(8)]
+    ));
+    *agent = Some(agent::start(
+        launcher.config(info.cwd, Some(session.to_owned())),
+        s.hub.clone(),
+    ));
 }
 
 async fn client(socket: WebSocket, s: Arc<AppState>) {
@@ -195,15 +242,19 @@ async fn client(socket: WebSocket, s: Arc<AppState>) {
                 continue;
             };
             match cmd {
-                ClientMsg::Prompt { text } => match &s2.agent {
+                ClientMsg::Prompt { text } => match current_agent(&s2) {
                     Some(a) => a.send(AgentCmd::Prompt(text)).await,
+                    None if s2.launcher.is_some() => s2
+                        .hub
+                        .notice("observing only: take over a session to talk to it"),
                     None => s2.hub.notice("replay mode: no agent to talk to"),
                 },
                 ClientMsg::Interrupt => {
-                    if let Some(a) = &s2.agent {
+                    if let Some(a) = current_agent(&s2) {
                         a.send(AgentCmd::Interrupt).await
                     }
                 }
+                ClientMsg::TakeOver { session } => take_over(&s2, &session),
                 ClientMsg::Permission { req_id, allow } => {
                     if !s2.hub.resolve_permission(&req_id, allow) {
                         s2.hub
@@ -220,21 +271,75 @@ async fn client(socket: WebSocket, s: Arc<AppState>) {
     }
 }
 
+fn hook_authed(s: &AppState, headers: &HeaderMap) -> bool {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    bearer.is_some_and(|b| ct_eq(b.as_bytes(), s.hook_token.as_bytes()))
+}
+
+/// Lifecycle events from any Claude Code session with the global hooks installed.
+async fn hook_event(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::Json<Value>,
+) -> Response {
+    if !hook_authed(&s, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let session = body["session_id"].as_str().unwrap_or_default();
+    if s.hub.session(session).is_some_and(|i| i.owned) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let out = s.hooks.lock().unwrap().payload(&body);
+    for b in out.bodies {
+        if let (EventBody::SessionStarted { cwd, .. }, Some(id)) = (&b, &out.session) {
+            s.hub.note_session(id, PathBuf::from(cwd), false);
+        }
+        s.hub.publish(out.session.clone(), None, b);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Claude drops the hook request when someone else decides first; axum then drops this
+/// handler's future mid-await, and the card has to go.
+struct Pending<'a> {
+    s: &'a AppState,
+    req_id: String,
+    session: Option<String>,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if self.s.hub.forget_permission(&self.req_id) {
+            self.s.hub.publish(
+                self.session.clone(),
+                None,
+                EventBody::PermissionWithdrawn {
+                    req_id: self.req_id.clone(),
+                },
+            );
+        }
+    }
+}
+
 async fn hook_permission(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> Response {
-    let bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    if !bearer.is_some_and(|b| ct_eq(b.as_bytes(), s.hook_token.as_bytes())) {
+    if !hook_authed(&s, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let req_id = ulid_like();
     let session = body["session_id"].as_str().map(str::to_owned);
     let rx = s.hub.park_permission(req_id.clone());
+    let _pending = Pending {
+        s: &s,
+        req_id: req_id.clone(),
+        session: session.clone(),
+    };
     s.hub.publish(
         session.clone(),
         None,
@@ -331,7 +436,9 @@ mod tests {
     fn app() -> Router {
         router(Arc::new(AppState {
             hub: Hub::new(),
-            agent: None,
+            agent: Mutex::new(None),
+            launcher: None,
+            hooks: Mutex::new(HookNormalizer::new()),
             port: 7777,
             token: "t0k".into(),
             hook_token: "h00k".into(),
@@ -417,7 +524,9 @@ mod tests {
         let hub = Hub::new();
         let state = Arc::new(AppState {
             hub: hub.clone(),
-            agent: None,
+            agent: Mutex::new(None),
+            launcher: None,
+            hooks: Mutex::new(HookNormalizer::new()),
             port: 7777,
             token: "t0k".into(),
             hook_token: "h00k".into(),
@@ -446,5 +555,65 @@ mod tests {
             .unwrap();
         let out: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(out["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    }
+
+    fn state(hub: Arc<Hub>) -> Arc<AppState> {
+        Arc::new(AppState {
+            hub,
+            agent: Mutex::new(None),
+            launcher: None,
+            hooks: Mutex::new(HookNormalizer::new()),
+            port: 7777,
+            token: "t0k".into(),
+            hook_token: "h00k".into(),
+            cwd: ".".into(),
+        })
+    }
+
+    fn hook_req(path: &str, body: &str) -> Request {
+        req(
+            "POST",
+            path,
+            &[
+                ("host", "127.0.0.1:7777"),
+                ("authorization", "Bearer h00k"),
+                ("content-type", "application/json"),
+            ],
+            body,
+        )
+    }
+
+    #[tokio::test]
+    async fn hooks_from_our_own_child_are_not_shown_twice() {
+        let hub = Hub::new();
+        hub.note_session("mine", ".".into(), true);
+        let app = router(state(hub.clone()));
+        let body = r#"{"hook_event_name":"UserPromptSubmit","session_id":"mine","prompt":"x"}"#;
+        app.clone()
+            .oneshot(hook_req("/hook/event", body))
+            .await
+            .unwrap();
+        assert!(hub.snapshot_and_subscribe().0.is_empty());
+
+        let body = r#"{"hook_event_name":"UserPromptSubmit","session_id":"theirs","cwd":"/r","prompt":"x"}"#;
+        app.oneshot(hook_req("/hook/event", body)).await.unwrap();
+        assert_eq!(hub.snapshot_and_subscribe().0.len(), 2);
+        assert!(!hub.session("theirs").unwrap().owned);
+    }
+
+    #[tokio::test]
+    async fn abandoned_permission_request_withdraws_its_card() {
+        let hub = Hub::new();
+        let (_, mut live) = hub.snapshot_and_subscribe();
+        let call = tokio::spawn(router(state(hub.clone())).oneshot(hook_req(
+            "/hook/permission",
+            r#"{"tool_name":"Bash","tool_input":{},"session_id":"s"}"#,
+        )));
+        let first: Value = serde_json::from_str(&live.recv().await.unwrap()).unwrap();
+        assert_eq!(first["body"]["type"], "permission_requested");
+        call.abort();
+        let next: Value = serde_json::from_str(&live.recv().await.unwrap()).unwrap();
+        assert_eq!(next["body"]["type"], "permission_withdrawn");
+        assert_eq!(hub.pending_permissions(), 0);
     }
 }

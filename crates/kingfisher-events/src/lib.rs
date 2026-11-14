@@ -6,9 +6,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod hooks;
+pub use hooks::HookNormalizer;
+
 pub const SCHEMA_VERSION: u16 = 1;
 
-const SUMMARY_CHARS: usize = 600;
+pub(crate) const SUMMARY_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentEvent {
@@ -139,6 +142,13 @@ pub enum EventBody {
     PermissionResolved {
         req_id: String,
         allow: bool,
+    },
+    /// Someone else answered first, such as the person at the terminal of an observed session.
+    PermissionWithdrawn {
+        req_id: String,
+    },
+    SessionEnded {
+        reason: Option<String>,
     },
     AgentExited {
         code: Option<i32>,
@@ -389,14 +399,14 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-fn paths(input: &Value) -> Vec<String> {
+pub(crate) fn paths(input: &Value) -> Vec<String> {
     ["file_path", "notebook_path", "path"]
         .iter()
         .filter_map(|k| str_at(input, k))
         .collect()
 }
 
-fn str_at(v: &Value, key: &str) -> Option<String> {
+pub(crate) fn str_at(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
@@ -408,7 +418,7 @@ fn strings(v: &Value) -> Vec<String> {
         .collect()
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}…", &s[..i]),
         None => s.to_owned(),

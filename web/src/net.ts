@@ -52,8 +52,8 @@ export function connect(handlers: {
   };
 }
 
-export async function fetchFiles(): Promise<{ root: string; files: string[] }> {
-  const res = await fetch('/api/files');
+export async function fetchFiles(cwd?: string): Promise<{ root: string; files: string[] }> {
+  const res = await fetch(cwd ? `/api/files?cwd=${encodeURIComponent(cwd)}` : '/api/files');
   if (!res.ok) return { root: '', files: [] };
   return res.json();
 }

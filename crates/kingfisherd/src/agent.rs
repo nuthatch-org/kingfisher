@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use kingfisher_events::{ClaudeNormalizer, EventBody};
@@ -36,6 +38,78 @@ pub struct AgentConfig {
     pub resume: Option<String>,
     pub extra_args: Vec<String>,
     pub archive: PathBuf,
+    /// Interrupt a turn that has said nothing for this long while no tool or permission is
+    /// outstanding. Covers the stream-json mid-stream hang (claude-code#53584).
+    pub watchdog: Option<Duration>,
+    /// Global hooks already route PermissionRequest here, so adding our own would ask twice.
+    pub global_permission_hook: bool,
+}
+
+/// What the stdout reader has seen, for the watchdog.
+struct Activity {
+    last: Instant,
+    busy: bool,
+    open_tools: HashSet<String>,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+            busy: false,
+            open_tools: HashSet::new(),
+        }
+    }
+
+    fn see(&mut self, body: &EventBody) {
+        self.last = Instant::now();
+        match body {
+            EventBody::TurnStarted { .. } => self.busy = true,
+            EventBody::TurnEnded { .. } | EventBody::AgentExited { .. } => {
+                self.busy = false;
+                self.open_tools.clear();
+            }
+            EventBody::ToolCall { call_id, .. } => {
+                self.open_tools.insert(call_id.clone());
+            }
+            EventBody::ToolResult { call_id, .. } => {
+                self.open_tools.remove(call_id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Everything needed to start an agent except where and which session, so a take-over can
+/// start one later in an observed session's own directory.
+pub struct Launcher {
+    pub claude: String,
+    pub hook_url: String,
+    pub hook_token: String,
+    pub keep_api_key: bool,
+    pub permission_mode: Option<String>,
+    pub extra_args: Vec<String>,
+    pub archive_dir: PathBuf,
+    pub watchdog: Option<Duration>,
+    pub global_permission_hook: bool,
+}
+
+impl Launcher {
+    pub fn config(&self, cwd: PathBuf, resume: Option<String>) -> AgentConfig {
+        AgentConfig {
+            claude: self.claude.clone(),
+            cwd,
+            hook_url: self.hook_url.clone(),
+            hook_token: self.hook_token.clone(),
+            keep_api_key: self.keep_api_key,
+            permission_mode: self.permission_mode.clone(),
+            resume,
+            extra_args: self.extra_args.clone(),
+            archive: self.archive_dir.join(format!("{}.ndjson", now_ms())),
+            watchdog: self.watchdog,
+            global_permission_hook: self.global_permission_hook,
+        }
+    }
 }
 
 pub enum AgentCmd {
@@ -78,13 +152,38 @@ async fn supervise(
     let mut session = cfg.resume.clone();
     let mut generation = 0u64;
     let mut running: Option<Running> = None;
+    let activity = Arc::new(Mutex::new(Activity::new()));
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
 
-    match spawn(&cfg, session.as_deref(), generation, &hub, &tx).await {
+    match spawn(&cfg, session.as_deref(), generation, &hub, &tx, &activity).await {
         Ok(r) => running = Some(r),
         Err(e) => hub.notice(format!("could not start claude: {e:#}")),
     }
 
-    while let Some(cmd) = rx.recv().await {
+    loop {
+        let cmd = tokio::select! {
+            cmd = rx.recv() => match cmd {
+                Some(cmd) => cmd,
+                None => break,
+            },
+            _ = tick.tick() => {
+                let Some(limit) = cfg.watchdog else { continue };
+                let stalled = {
+                    let a = activity.lock().unwrap();
+                    a.busy && a.open_tools.is_empty() && a.last.elapsed() > limit
+                };
+                if stalled && running.is_some() && hub.pending_permissions() == 0 {
+                    hub.notice(format!(
+                        "watchdog: no output for {}s mid-turn, interrupting; the next message resumes",
+                        limit.as_secs()
+                    ));
+                    activity.lock().unwrap().busy = false;
+                    AgentCmd::Interrupt
+                } else {
+                    continue;
+                }
+            }
+        };
         match cmd {
             AgentCmd::SessionId(id) => session = Some(id),
             AgentCmd::Exited(g) => {
@@ -107,7 +206,7 @@ async fn supervise(
             AgentCmd::Prompt(text) => {
                 if running.is_none() {
                     generation += 1;
-                    match spawn(&cfg, session.as_deref(), generation, &hub, &tx).await {
+                    match spawn(&cfg, session.as_deref(), generation, &hub, &tx, &activity).await {
                         Ok(r) => running = Some(r),
                         Err(e) => {
                             hub.notice(format!("could not start claude: {e:#}"));
@@ -136,6 +235,9 @@ async fn supervise(
 }
 
 fn settings(cfg: &AgentConfig) -> String {
+    if cfg.global_permission_hook {
+        return "{}".into();
+    }
     json!({
         "hooks": {
             "PermissionRequest": [{
@@ -159,6 +261,7 @@ async fn spawn(
     generation: u64,
     hub: &Arc<Hub>,
     tx: &mpsc::Sender<AgentCmd>,
+    activity: &Arc<Mutex<Activity>>,
 ) -> Result<Running> {
     let mut cmd = Command::new(&cfg.claude);
     cmd.current_dir(&cfg.cwd)
@@ -209,12 +312,15 @@ async fn spawn(
         .await
         .with_context(|| format!("opening archive {}", cfg.archive.display()))?;
 
+    *activity.lock().unwrap() = Activity::new();
     tokio::spawn(read_stdout(
         stdout,
         archive,
         hub.clone(),
         tx.clone(),
         generation,
+        activity.clone(),
+        cfg.cwd.clone(),
     ));
     let hub2 = hub.clone();
     tokio::spawn(async move {
@@ -242,6 +348,8 @@ async fn read_stdout(
     hub: Arc<Hub>,
     tx: mpsc::Sender<AgentCmd>,
     generation: u64,
+    activity: Arc<Mutex<Activity>>,
+    cwd: PathBuf,
 ) {
     let mut normalizer = ClaudeNormalizer::new();
     let mut lines = BufReader::new(stdout).lines();
@@ -260,9 +368,11 @@ async fn read_stdout(
                 }
                 let out = normalizer.line(&line);
                 for body in out.bodies {
+                    activity.lock().unwrap().see(&body);
                     if let EventBody::SessionStarted { .. } = &body
                         && let Some(id) = &out.session
                     {
+                        hub.note_session(id, cwd.clone(), true);
                         let _ = tx.send(AgentCmd::SessionId(id.clone())).await;
                     }
                     hub.publish(out.session.clone(), out.parent.clone(), body);

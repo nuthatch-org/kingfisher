@@ -3,6 +3,8 @@ import { Observatory } from './scene';
 import { authenticate, connect, fetchFiles, type Link } from './net';
 import { KIND_COLOR, KIND_GLYPH, TEST_COMMAND } from './palette';
 import type { AgentEvent, ToolKind } from './types';
+import { editsOf, renderDiff } from './diff';
+import { Sonifier } from './sound';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const el = (tag: string, cls?: string, text?: string) => {
@@ -14,6 +16,7 @@ const el = (tag: string, cls?: string, text?: string) => {
 
 interface ToolEntry {
   row: HTMLElement;
+  tick: HTMLElement;
   kind: ToolKind;
   tool: string;
   paths: string[];
@@ -49,6 +52,11 @@ class App {
   private priorCost = 0;
   private processCost = 0;
   private root = '';
+  private river = $('river');
+  private lastSession: string | null = null;
+  readonly sound = new Sonifier();
+  /** Set by main: an observed session living in another repository swaps the sky to it. */
+  onCwd: (cwd: string) => void = () => {};
 
   constructor(private scene: Observatory) {}
 
@@ -74,6 +82,11 @@ class App {
       }
     });
     $('drawer-close').addEventListener('click', () => $('drawer').classList.remove('open'));
+    $('sound').addEventListener('click', () => {
+      const on = this.sound.toggle();
+      $('sound').textContent = on ? 'sound on' : 'sound off';
+      $('sound').className = on ? 'chip ok' : 'chip dim';
+    });
   }
 
   private submit() {
@@ -99,6 +112,8 @@ class App {
     this.streamBuf = this.thinkBuf = '';
     this.tools.clear();
     this.touches.clear();
+    this.river.replaceChildren();
+    this.lastSession = null;
     this.priorCost = this.processCost = 0;
     for (const p of this.perms.values()) p.remove();
     this.perms.clear();
@@ -120,23 +135,56 @@ class App {
   private one(e: AgentEvent, live: boolean) {
     const b = e.body;
     const sub = e.parent !== null;
+    if (e.session && this.lastSession && e.session !== this.lastSession && b.type !== 'session_started') {
+      this.endStream();
+      this.divider(e.session, false);
+    }
+    if (e.session) this.lastSession = e.session;
     switch (b.type) {
       case 'session_started': {
+        // Hook-observed sessions carry no auth source; only stream-json sessions report one.
+        const observed = b.api_key_source === null;
+        if (e.session) {
+          if (observed) this.observed.add(e.session);
+          else this.observed.delete(e.session);
+        }
         $('model').textContent = b.model;
         $('cwd').textContent = b.cwd.split('/').pop() || b.cwd;
         $('cwd').title = b.cwd;
         const auth = $('auth');
-        const subscription = b.api_key_source === 'none';
-        auth.textContent = subscription ? 'subscription' : `api key: ${b.api_key_source}`;
-        auth.className = subscription ? 'chip ok' : 'chip warn';
+        if (observed) {
+          auth.textContent = 'observed';
+          auth.className = 'chip dim';
+        } else {
+          const subscription = b.api_key_source === 'none';
+          auth.textContent = subscription ? 'subscription' : `api key: ${b.api_key_source}`;
+          auth.className = subscription ? 'chip ok' : 'chip warn';
+        }
         if (b.version) $('version').textContent = `claude ${b.version}`;
-        if (!sub) this.notice(`session ${e.session?.slice(0, 8) ?? ''} · ${b.permission_mode ?? 'default'} permissions`);
+        if (!sub && e.session) {
+          this.endStream();
+          this.divider(e.session, observed, `${b.cwd.split('/').pop() || b.cwd} · ${b.permission_mode ?? 'default'} permissions`);
+        }
+        if (b.cwd && b.cwd.replace(/\/$/, '') !== this.root) this.onCwd(b.cwd);
+        break;
+      }
+      case 'session_ended':
+        this.endStream();
+        this.setBusy(false);
+        this.notice(`session ended${b.reason ? ` (${b.reason})` : ''}`);
+        break;
+      case 'permission_withdrawn': {
+        this.perms.get(b.req_id)?.remove();
+        this.perms.delete(b.req_id);
+        this.notice('answered elsewhere');
+        this.scene.setWaiting(this.perms.size > 0);
         break;
       }
       case 'turn_started':
         this.endStream();
         this.entry('user', b.text);
         this.setBusy(true);
+        this.river.append(el('span', 'turn'));
         if (live) this.scene.turnStarted();
         break;
       case 'thinking_delta':
@@ -150,6 +198,7 @@ class App {
           this.thinkTokens = 0;
         }
         this.thinkBuf += b.text;
+        if (live) this.sound.thinking();
         if (b.estimated_tokens && b.estimated_tokens > this.thinkTokens) {
           this.thinkTokens = b.estimated_tokens;
           if (this.thinkSummary) this.thinkSummary.textContent = `thinking · ~${fmt(this.thinkTokens)} tokens`;
@@ -179,7 +228,9 @@ class App {
         this.endStream();
         const command = typeof b.input?.command === 'string' ? b.input.command : '';
         const row = this.toolRow(b.tool, b.kind, b.input, sub);
-        const entry: ToolEntry = { row, kind: b.kind, tool: b.tool, paths: b.paths, test: TEST_COMMAND.test(command), parent: e.parent };
+        const tick = this.tick(row, b.kind, b.tool, b.input);
+        if (live) this.sound.tool(b.kind);
+        const entry: ToolEntry = { row, tick, kind: b.kind, tool: b.tool, paths: b.paths, test: TEST_COMMAND.test(command), parent: e.parent };
         this.tools.set(b.call_id, entry);
         for (const p of b.paths) {
           const key = this.rel(p);
@@ -195,6 +246,9 @@ class App {
         const t = this.tools.get(b.call_id);
         if (!t) break;
         t.row.classList.add(b.ok ? 'ok' : 'err');
+        t.tick.classList.add(b.ok ? 'ok' : 'err');
+        if (live && t.test) b.ok ? this.sound.testsPassed() : this.sound.failure();
+        else if (live && !b.ok) this.sound.failure();
         const out = el('pre', 'result', b.summary || (b.ok ? '(no output)' : '(failed)'));
         t.row.querySelector('.detail')?.append(out);
         for (const p of t.paths) {
@@ -226,10 +280,12 @@ class App {
         }
         this.gauges();
         this.setBusy(false);
+        if (live) this.sound.yourTurn();
         if (!b.ok) this.notice(`turn ended: ${b.reason ?? 'error'}`, 'warn');
         break;
       case 'permission_requested':
         this.permission(b.req_id, b.tool, b.input);
+        if (live) this.sound.permission();
         break;
       case 'permission_resolved': {
         const card = this.perms.get(b.req_id);
@@ -308,11 +364,44 @@ class App {
     const head = el('div', 'head');
     head.append(el('span', 'glyph', KIND_GLYPH[kind]), el('span', 'name', tool), el('span', 'arg', describe(tool, input, this.root)));
     const detail = el('div', 'detail');
-    detail.append(el('pre', 'input', JSON.stringify(input, null, 2)));
+    const edits = editsOf(tool, input);
+    if (edits?.length) {
+      if (typeof input.file_path === 'string') detail.append(el('div', 'diff-path', this.rel(input.file_path)));
+      detail.append(renderDiff(edits));
+      if (kind === 'edit' || kind === 'write') row.classList.add('open');
+    } else {
+      detail.append(el('pre', 'input', JSON.stringify(input, null, 2)));
+    }
     row.append(head, detail);
     head.addEventListener('click', () => row.classList.toggle('open'));
     this.log.append(row);
     return row;
+  }
+
+  private divider(session: string, observed: boolean, label = '') {
+    const d = el('div', 'session');
+    d.append(el('span', 'sid', `session ${session.slice(0, 8)}`), el('span', 'what', label));
+    if (observed) {
+      const b = el('button', 'takeover', 'take over');
+      b.title = 'Continue this session here with --resume. Close it in the terminal first.';
+      b.addEventListener('click', () => this.link.send({ type: 'take_over', session }));
+      d.append(b);
+    }
+    this.log.append(d);
+  }
+
+  private tick(row: HTMLElement, kind: ToolKind, tool: string, input: any): HTMLElement {
+    const t = el('span', 'tick');
+    t.style.setProperty('--kind', KIND_COLOR[kind]);
+    t.title = `${tool} ${describe(tool, input, this.root)}`;
+    t.addEventListener('click', () => {
+      row.classList.add('open', 'flash');
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setTimeout(() => row.classList.remove('flash'), 1200);
+    });
+    this.river.append(t);
+    this.river.scrollLeft = this.river.scrollWidth;
+    return t;
   }
 
   private permission(reqId: string, tool: string, input: any) {
@@ -321,11 +410,9 @@ class App {
     if (typeof input?.command === 'string') {
       card.append(el('pre', 'perm-cmd', input.command));
       if (input.description) card.append(el('div', 'perm-desc', input.description));
-    } else if (typeof input?.old_string === 'string') {
+    } else if (editsOf(tool, input)?.length) {
       card.append(el('div', 'perm-desc', this.rel(input.file_path ?? '')));
-      const diff = el('div', 'perm-diff');
-      diff.append(el('pre', 'del', input.old_string), el('pre', 'add', input.new_string ?? ''));
-      card.append(diff);
+      card.append(renderDiff(editsOf(tool, input)!));
     } else {
       if (input?.file_path) card.append(el('div', 'perm-desc', this.rel(input.file_path)));
       card.append(el('pre', 'perm-cmd', JSON.stringify(input, null, 2)));
@@ -342,12 +429,16 @@ class App {
     this.scene.setWaiting(true);
   }
 
+  /** Sessions seen only through hooks: kingfisher can watch and approve them, not steer them. */
+  private observed = new Set<string>();
+
   private setBusy(busy: boolean) {
     this.busy = busy;
     const s = $('state');
-    s.textContent = busy ? 'working' : 'your turn';
+    s.textContent = busy ? 'working' : this.lastSession && this.observed.has(this.lastSession) ? 'idle' : 'your turn';
     s.className = busy ? 'chip busy' : 'chip';
-    $('interrupt').toggleAttribute('disabled', !busy);
+    const steerable = !(this.lastSession && this.observed.has(this.lastSession));
+    $('interrupt').toggleAttribute('disabled', !busy || !steerable);
   }
 
   private gauges() {
@@ -430,10 +521,22 @@ async function main() {
   await scene.start();
   $('backend').textContent = scene.backend;
 
-  const { root, files } = await fetchFiles();
-  app.setRoot(root);
-  scene.setFiles(root, files);
-  $('files').textContent = `${files.length} files`;
+  const loadFiles = async (cwd?: string) => {
+    const { root, files } = await fetchFiles(cwd);
+    if (cwd && !root) return;
+    app.setRoot(root);
+    scene.setFiles(root, files);
+    $('files').textContent = `${files.length} files`;
+  };
+  await loadFiles();
+  app.onCwd = (cwd) => void loadFiles(cwd);
+  let last = performance.now();
+  const decay = (now: number) => {
+    app.sound.decay((now - last) / 1000);
+    last = now;
+    requestAnimationFrame(decay);
+  };
+  requestAnimationFrame(decay);
 
   const link = connect({
     events: (events, backlog) => app.apply(events, backlog),
