@@ -145,3 +145,7 @@ Found in testing, against the report:
 Re-read Anthropic's Claude Code legal page. The design relies on its carve-out for an end user
 signing in to the unmodified binary with their own subscription, and that wording changed several
 times in 2026.
+
+## Licence
+
+MIT or Apache-2.0, at your option.
