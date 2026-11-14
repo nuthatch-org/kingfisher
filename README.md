@@ -55,6 +55,14 @@ only while the daemon runs and nothing is written to your Tailscale config. The 
 binds to localhost only. `--tailscale-port` picks another HTTPS port than 443. On macOS the CLI
 inside `Tailscale.app` is used when `tailscale` is not on the path.
 
+### Following a session that is already running
+
+`--follow ~/.claude/projects/<dir>/<session>.jsonl` tails that session's own transcript, read-only,
+starting about 1.5 MB from the end. It needs no hooks, so it works for sessions started before
+kingfisher. The transcript format is internal to Claude Code and changes between versions, so this
+is best effort: no token streaming and no permission cards, and the session keeps being driven from
+its own terminal.
+
 ### Watching sessions you started yourself
 
 ```sh

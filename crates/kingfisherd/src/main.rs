@@ -1,5 +1,6 @@
 mod agent;
 mod archive;
+mod follow;
 mod hub;
 mod install;
 mod replay;
@@ -32,6 +33,11 @@ struct Cli {
     /// Replay an archive or a `claude -p --output-format stream-json` capture instead of running an agent.
     #[arg(long)]
     replay: Option<PathBuf>,
+    /// Follow a running Claude Code session through its transcript file
+    /// (`~/.claude/projects/<dir>/<session>.jsonl`), read-only. Works for sessions kingfisher
+    /// did not start and that have no hooks.
+    #[arg(long, conflicts_with = "replay")]
+    follow: Option<PathBuf>,
     /// Replay speed multiplier.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
@@ -204,8 +210,12 @@ async fn main() -> Result<()> {
         Some(Command::UninstallHooks { yes }) => return install::run(false, 0, "", yes),
         None => {}
     }
-    let cwd =
-        std::fs::canonicalize(&cli.cwd).with_context(|| format!("cwd {}", cli.cwd.display()))?;
+    let cwd = match cli.follow.as_deref().and_then(follow::cwd_of) {
+        Some(followed) => followed,
+        None => {
+            std::fs::canonicalize(&cli.cwd).with_context(|| format!("cwd {}", cli.cwd.display()))?
+        }
+    };
 
     let token = random_hex(32);
     let hook_token = hook_token()?;
@@ -260,8 +270,16 @@ async fn main() -> Result<()> {
             banter: banter.clone(),
         }),
     };
+    if let Some(path) = cli.follow.clone() {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            if let Err(e) = follow::run(path, hub.clone()).await {
+                hub.notice(format!("follow stopped: {e:#}"));
+            }
+        });
+    }
     let agent = match &launcher {
-        Some(l) if !cli.observe => Some(agent::start(
+        Some(l) if !cli.observe && cli.follow.is_none() => Some(agent::start(
             l.config(cwd.clone(), cli.resume.clone()),
             hub.clone(),
         )),

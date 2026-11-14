@@ -181,11 +181,24 @@ pub struct Normalized {
 #[derive(Debug, Default)]
 pub struct ClaudeNormalizer {
     tools_by_call: HashMap<String, String>,
+    /// Reading a session's own transcript file rather than a stream-json pipe.
+    transcript: bool,
+    announced: bool,
 }
 
 impl ClaudeNormalizer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// For `~/.claude/projects/*/<session>.jsonl`. Its format is internal to Claude Code and
+    /// changes between versions, so this is best effort: prompts arrive without `isReplay`,
+    /// turns end with `system/turn_duration`, and bookkeeping lines are dropped.
+    pub fn for_transcript() -> Self {
+        Self {
+            transcript: true,
+            ..Self::default()
+        }
     }
 
     pub fn line(&mut self, line: &str) -> Normalized {
@@ -201,6 +214,9 @@ impl ClaudeNormalizer {
     }
 
     pub fn value(&mut self, v: &Value) -> Normalized {
+        if self.transcript {
+            return self.transcript_value(v);
+        }
         let session = str_at(v, "session_id");
         let parent = str_at(v, "parent_tool_use_id");
         let bodies = match v["type"].as_str().unwrap_or("") {
@@ -217,6 +233,66 @@ impl ClaudeNormalizer {
         Normalized {
             session,
             parent,
+            bodies,
+        }
+    }
+
+    fn transcript_value(&mut self, v: &Value) -> Normalized {
+        let session = str_at(v, "sessionId");
+        let mut bodies = vec![];
+        let kind = v["type"].as_str().unwrap_or("");
+        if !self.announced
+            && matches!(kind, "user" | "assistant")
+            && let Some(cwd) = str_at(v, "cwd")
+        {
+            self.announced = true;
+            bodies.push(EventBody::SessionStarted {
+                model: str_at(&v["message"], "model").unwrap_or_else(|| "followed session".into()),
+                cwd,
+                tools: vec![],
+                mcp: vec![],
+                capabilities: vec![],
+                permission_mode: None,
+                api_key_source: None,
+                version: str_at(v, "version"),
+            });
+        }
+        match kind {
+            "assistant" => bodies.extend(self.assistant(v)),
+            "user" => {
+                if let Some(text) = v["message"]["content"].as_str() {
+                    // Task notifications and messages from other sessions also arrive as user turns.
+                    let machine =
+                        text.starts_with('<') || text.starts_with("Another Claude session");
+                    bodies.push(if machine || v["isMeta"].as_bool() == Some(true) {
+                        EventBody::Notice {
+                            text: truncate(text.lines().next().unwrap_or(""), 120),
+                        }
+                    } else {
+                        EventBody::TurnStarted { text: text.into() }
+                    });
+                } else {
+                    bodies.extend(self.user(&serde_json::json!({
+                        "isReplay": true,
+                        "message": v["message"],
+                    })));
+                }
+            }
+            "system" if v["subtype"] == "turn_duration" => bodies.push(EventBody::TurnEnded {
+                ok: true,
+                reason: Some("end of turn".into()),
+                cost_usd: None,
+                duration_ms: v["durationMs"].as_u64(),
+                context_window: None,
+            }),
+            "system" if v["subtype"] == "compact_boundary" => bodies.push(EventBody::Compaction {
+                trigger: str_at(&v["compactMetadata"], "trigger"),
+            }),
+            _ => {}
+        }
+        Normalized {
+            session,
+            parent: None,
             bodies,
         }
     }

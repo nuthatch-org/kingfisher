@@ -180,3 +180,36 @@ fn aborted_turn_has_no_cost_rather_than_zero() {
     assert_eq!(*cost_usd, None);
     assert_eq!(reason.as_deref(), Some("aborted_streaming"));
 }
+
+#[test]
+fn a_session_transcript_reads_like_the_stream() {
+    let mut n = ClaudeNormalizer::for_transcript();
+    let lines = [
+        r#"{"type":"api-request","sessionId":"s"}"#,
+        r#"{"type":"user","sessionId":"s","cwd":"/repo","message":{"role":"user","content":"letsgoo"}}"#,
+        r#"{"type":"assistant","sessionId":"s","cwd":"/repo","message":{"model":"m","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        r#"{"type":"user","sessionId":"s","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a\nb"}]}}"#,
+        r#"{"type":"user","sessionId":"s","message":{"content":"<task-notification>\n<task-id>x</task-id>"}}"#,
+        r#"{"type":"system","subtype":"turn_duration","sessionId":"s","durationMs":1200}"#,
+    ];
+    let bodies: Vec<EventBody> = lines.iter().flat_map(|l| n.line(l).bodies).collect();
+    let kinds: Vec<&str> = bodies
+        .iter()
+        .map(|b| match b {
+            EventBody::SessionStarted { .. } => "start",
+            EventBody::TurnStarted { .. } => "prompt",
+            EventBody::ToolCall { .. } => "call",
+            EventBody::ToolResult { .. } => "result",
+            EventBody::Notice { .. } => "notice",
+            EventBody::TurnEnded { .. } => "end",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["start", "prompt", "call", "result", "notice", "end"]
+    );
+    assert!(
+        matches!(&bodies[3], EventBody::ToolResult { tool: Some(t), ok: true, .. } if t == "Bash")
+    );
+}
