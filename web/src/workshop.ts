@@ -1423,12 +1423,14 @@ export class Workshop {
     }
   }
 
+  /** The terminal closed: the robot clocks off through the loading bay. */
   sessionEnded(session: string | null) {
     const r = this.robots.get(session ?? 'main');
     if (!r) return;
-    r.goTo('lounge');
     r.idle = true;
-    r.setAction('session ended');
+    r.leaving = true;
+    r.goTo('door');
+    r.setAction('clocking off');
   }
 
   setWaiting(session: string | null, tool: string | null, waiting: boolean) {

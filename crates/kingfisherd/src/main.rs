@@ -313,8 +313,13 @@ async fn main() -> Result<()> {
     };
     if let Some(dir) = here_dir.clone() {
         let hub = hub.clone();
+        let here = std::fs::canonicalize(&cli.cwd)?;
+        let registry = projects_root
+            .parent()
+            .map(|c| c.join("sessions"))
+            .unwrap_or_default();
         tokio::spawn(async move {
-            if let Err(e) = follow::run_project(dir, hub.clone()).await {
+            if let Err(e) = follow::run_project(dir, here, registry, hub.clone()).await {
                 hub.notice(format!("watching stopped: {e:#}"));
             }
         });

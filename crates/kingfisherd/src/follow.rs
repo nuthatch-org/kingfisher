@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use kingfisher_events::{ClaudeNormalizer, EventBody};
+use tokio::task::JoinHandle;
 
 use crate::hub::Hub;
 
@@ -54,17 +55,88 @@ pub async fn run_all(projects: PathBuf, hub: Arc<Hub>, window: Duration) -> Resu
     run_matching(projects, hub, window, None).await
 }
 
-/// One project's sessions only: the transcripts in that project's own folder.
-pub async fn run_project(dir: PathBuf, hub: Arc<Hub>) -> Result<()> {
-    let projects = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+/// A Claude Code process's entry in `~/.claude/sessions/<pid>.json`. Internal to Claude Code,
+/// so read leniently: only the three fields used here.
+#[derive(serde::Deserialize)]
+struct OpenSession {
+    pid: i32,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    cwd: PathBuf,
+}
+
+fn alive(pid: i32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
+/// Session ids of the Claude Code terminals open in `cwd` right now, or `None` when this
+/// Claude Code keeps no registry to ask.
+pub fn open_sessions(registry: &Path, cwd: &Path) -> Option<Vec<String>> {
+    let entries = std::fs::read_dir(registry).ok()?;
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| serde_json::from_slice::<OpenSession>(&std::fs::read(e.path()).ok()?).ok())
+        .filter(|s| s.cwd == cwd && alive(s.pid))
+        .map(|s| s.session_id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Some(ids)
+}
+
+/// One project, one terminal or more: follow exactly the sessions open in `cwd`, add ones that
+/// open later, and see off ones that close.
+pub async fn run_project(
+    dir: PathBuf,
+    cwd: PathBuf,
+    registry: PathBuf,
+    hub: Arc<Hub>,
+) -> Result<()> {
     hub.notice(format!(
-        "watching this project's Claude Code sessions ({})",
-        dir.file_name()
-            .map(|d| d.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        "watching the Claude Code sessions open in {}",
+        cwd.display()
     ));
-    // Six hours back, so a session left open over lunch is still on the floor.
-    run_matching(projects, hub, Duration::from_secs(6 * 3600), Some(dir)).await
+    if open_sessions(&registry, &cwd).is_none() {
+        // An older Claude Code without the registry: fall back to recently written transcripts.
+        let projects = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+        return run_matching(projects, hub, Duration::from_secs(10 * 60), Some(dir)).await;
+    }
+    let mut following: std::collections::HashMap<String, JoinHandle<()>> = Default::default();
+    loop {
+        let open = open_sessions(&registry, &cwd).unwrap_or_default();
+        for id in &open {
+            let path = dir.join(format!("{id}.jsonl"));
+            if following.contains_key(id) || !path.exists() {
+                continue;
+            }
+            let hub = hub.clone();
+            let task = tokio::spawn(async move {
+                if let Err(e) = run_from(path.clone(), hub.clone(), BACKLOG_BYTES).await {
+                    hub.notice(format!("stopped following {}: {e:#}", path.display()));
+                }
+            });
+            following.insert(id.clone(), task);
+        }
+        let closed: Vec<String> = following
+            .keys()
+            .filter(|id| !open.contains(id))
+            .cloned()
+            .collect();
+        for id in closed {
+            if let Some(task) = following.remove(&id) {
+                task.abort();
+            }
+            hub.publish(
+                Some(id),
+                None,
+                EventBody::SessionEnded {
+                    reason: Some("terminal closed".into()),
+                },
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 async fn run_matching(
@@ -205,6 +277,38 @@ async fn run_from(path: PathBuf, hub: Arc<Hub>, backlog: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_live_sessions_in_this_folder_count_as_open() {
+        let reg = std::env::temp_dir().join(format!("kf-sessions-{}", std::process::id()));
+        std::fs::create_dir_all(&reg).unwrap();
+        let me = std::process::id();
+        std::fs::write(
+            reg.join("a.json"),
+            format!(r#"{{"pid":{me},"sessionId":"open-here","cwd":"/p/app","status":"busy"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            reg.join("b.json"),
+            format!(r#"{{"pid":{me},"sessionId":"open-elsewhere","cwd":"/p/other"}}"#),
+        )
+        .unwrap();
+        // A pid that cannot be running: the entry outlived its process.
+        std::fs::write(
+            reg.join("c.json"),
+            r#"{"pid":999999,"sessionId":"stale","cwd":"/p/app"}"#,
+        )
+        .unwrap();
+        std::fs::write(reg.join("d.json"), "not json").unwrap();
+        assert_eq!(
+            open_sessions(&reg, Path::new("/p/app")),
+            Some(vec!["open-here".to_string()])
+        );
+        assert_eq!(
+            open_sessions(&reg.join("missing"), Path::new("/p/app")),
+            None
+        );
+    }
 
     #[test]
     fn project_folders_are_found_by_their_encoded_path() {
