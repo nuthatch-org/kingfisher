@@ -29,6 +29,23 @@ the replay returns to the live session where it was. `--replay <file>` does the 
 command line, and also takes a bare `claude -p --output-format stream-json` capture. Anything
 after `--` goes to `claude`.
 
+### Switches
+
+**ask me / autonomous** in the footer: while autonomous, the daemon approves every permission
+request itself and logs each one as `auto-approved`. It starts off unless `--autonomous` is given,
+and switching it on also releases anything already waiting. Claude Code's own deny rules still
+apply. **banter** adds a standing instruction for absurd motoring-presenter asides in the agent's
+replies, never in code, commits or files; it takes effect on the next message by resuming the
+session.
+
+### Watching from a phone
+
+`--phone` adds a second, read-only listener on the local network at port+1, with its own token.
+The daemon prints its address and a QR code, and the **phone** chip shows the same QR. That view
+cannot prompt, approve, switch modes or take over, and anything it sends is dropped. It runs on
+WebGL2 rather than WebGPU, because browsers only offer WebGPU on secure origins and a plain-http LAN
+address is not one. macOS may ask once whether `kingfisherd` may accept incoming connections.
+
 ### Watching sessions you started yourself
 
 ```sh

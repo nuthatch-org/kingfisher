@@ -35,7 +35,8 @@ export type EventBody =
       context_window: number | null;
     }
   | { type: 'permission_requested'; req_id: string; tool: string; input: any }
-  | { type: 'permission_resolved'; req_id: string; allow: boolean }
+  | { type: 'permission_resolved'; req_id: string; allow: boolean; auto?: boolean }
+  | { type: 'mode'; autonomous: boolean; banter: boolean }
   | { type: 'permission_withdrawn'; req_id: string }
   | { type: 'session_ended'; reason: string | null }
   | { type: 'agent_exited'; code: number | null }
@@ -55,4 +56,5 @@ export type ClientMsg =
   | { type: 'prompt'; text: string }
   | { type: 'interrupt' }
   | { type: 'permission'; req_id: string; allow: boolean }
-  | { type: 'take_over'; session: string };
+  | { type: 'take_over'; session: string }
+  | { type: 'set_mode'; autonomous?: boolean; banter?: boolean };

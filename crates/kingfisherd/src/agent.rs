@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -42,7 +43,17 @@ pub struct AgentConfig {
     pub watchdog: Option<Duration>,
     /// Global hooks already route PermissionRequest here, so adding our own would ask twice.
     pub global_permission_hook: bool,
+    /// Read at each spawn; a change takes effect by resuming the session on the next message.
+    pub banter: Arc<AtomicBool>,
 }
+
+/// Appended to the agent's system prompt while banter is on. The work itself must not change.
+const BANTER: &str = "While you work, keep up a running commentary in your conversational replies in the \
+manner of a bombastic British motoring presenter: grand, absurd contemplations about the code, the \
+tools and the task, mock-heroic struggle, wild hyperbole, the conviction that this is the greatest \
+or most catastrophic thing ever attempted. One or two short asides per reply, never more. None of it \
+may appear in code, comments, commit messages, file contents, PR or issue text, or tool inputs: the \
+work itself stays exactly as rigorous and plain as it would otherwise be.";
 
 /// What the stdout reader has seen, for the watchdog.
 struct Activity {
@@ -91,6 +102,7 @@ pub struct Launcher {
     pub archive_dir: PathBuf,
     pub watchdog: Option<Duration>,
     pub global_permission_hook: bool,
+    pub banter: Arc<AtomicBool>,
 }
 
 impl Launcher {
@@ -107,6 +119,7 @@ impl Launcher {
             archive: self.archive_dir.join(format!("{}.ndjson", now_ms())),
             watchdog: self.watchdog,
             global_permission_hook: self.global_permission_hook,
+            banter: self.banter.clone(),
         }
     }
 }
@@ -129,6 +142,7 @@ impl AgentHandle {
 
 struct Running {
     generation: u64,
+    banter: bool,
     child: Child,
     stdin: ChildStdin,
 }
@@ -203,6 +217,13 @@ async fn supervise(
                 None => hub.notice("nothing to interrupt: the agent is not running"),
             },
             AgentCmd::Prompt(text) => {
+                if let Some(r) = running.as_mut()
+                    && r.banter != cfg.banter.load(Ordering::Relaxed)
+                {
+                    // The system prompt is fixed at spawn, so a changed switch means a resume.
+                    let _ = r.child.kill().await;
+                    running = None;
+                }
                 if running.is_none() {
                     generation += 1;
                     match spawn(&cfg, session.as_deref(), generation, &hub, &tx, &activity).await {
@@ -284,6 +305,10 @@ async fn spawn(
     if let Some(mode) = &cfg.permission_mode {
         cmd.args(["--permission-mode", mode]);
     }
+    let banter = cfg.banter.load(Ordering::Relaxed);
+    if banter {
+        cmd.args(["--append-system-prompt", BANTER]);
+    }
     cmd.args(&cfg.extra_args);
     for var in STRIP_ENV {
         cmd.env_remove(var);
@@ -337,6 +362,7 @@ async fn spawn(
     });
     Ok(Running {
         generation,
+        banter,
         child,
         stdin,
     })

@@ -1,6 +1,6 @@
 import './style.css';
 import { Workshop } from './workshop';
-import { authenticate, connect, fetchFiles, type Link } from './net';
+import { authenticate, connect, fetchFiles, fetchRole, type Link } from './net';
 import { KIND_COLOR, KIND_GLYPH, TEST_COMMAND } from './palette';
 import type { AgentEvent, ToolKind } from './types';
 import { editsOf, renderDiff } from './diff';
@@ -54,6 +54,8 @@ class App {
   private processCost = 0;
   private root = '';
   private river = $('river');
+  private autonomous = false;
+  private banter = false;
   private lastSession: string | null = null;
   readonly sound = new Sonifier();
   /** Set by main: an observed session living in another repository swaps the sky to it. */
@@ -83,6 +85,8 @@ class App {
       }
     });
     $('drawer-close').addEventListener('click', () => $('drawer').classList.remove('open'));
+    $('auto').addEventListener('click', () => this.link.send({ type: 'set_mode', autonomous: !this.autonomous }));
+    $('banter').addEventListener('click', () => this.link.send({ type: 'set_mode', banter: !this.banter }));
     $('sound').addEventListener('click', () => {
       const on = this.sound.toggle();
       $('sound').textContent = on ? 'sound on' : 'sound off';
@@ -300,14 +304,29 @@ class App {
         if (!b.ok) this.notice(`turn ended: ${b.reason ?? 'error'}`, 'warn');
         break;
       case 'permission_requested':
+        // In autonomous mode the answer follows at once; a card would only flicker.
+        if (this.autonomous) break;
         this.permission(b.req_id, b.tool, b.input, e.session);
         if (live) this.sound.permission();
         break;
+      case 'mode': {
+        this.autonomous = b.autonomous;
+        this.banter = b.banter;
+        const a = $('auto');
+        a.textContent = b.autonomous ? 'autonomous' : 'ask me';
+        a.className = b.autonomous ? 'chip warn' : 'chip';
+        a.title = b.autonomous ? 'Approving every permission request without asking. Click to be asked again.' : 'Asking before each permission request. Click to let it work on its own.';
+        const t = $('banter');
+        t.textContent = b.banter ? 'banter on' : 'banter off';
+        t.className = b.banter ? 'chip ok' : 'chip dim';
+        t.title = 'Absurd motoring-presenter asides in the agent\'s replies. Takes effect on the next message.';
+        break;
+      }
       case 'permission_resolved': {
         const card = this.perms.get(b.req_id);
         card?.remove();
         this.perms.delete(b.req_id);
-        this.notice(`${b.allow ? 'allowed' : 'denied'}`, b.allow ? '' : 'warn');
+        this.notice(b.auto ? 'auto-approved' : b.allow ? 'allowed' : 'denied', b.allow ? '' : 'warn');
         this.scene.setWaiting(e.session, null, this.perms.size > 0);
         break;
       }
@@ -538,6 +557,19 @@ async function main() {
   await authenticate().catch(() => false);
   await scene.start();
   scene.placeholder();
+  const { role, phone } = await fetchRole();
+  // The phone view is read-only; hide every control rather than leave dead buttons.
+  if (role === 'watch') document.body.classList.add('watch');
+  if (phone) {
+    const chip = $('phone');
+    chip.hidden = false;
+    chip.addEventListener('click', () => {
+      $<HTMLImageElement>('phone-qr').src = `/api/phone.svg?${Date.now()}`;
+      $('phone-url').textContent = phone.replace(/#t=.*/, '');
+      $('phone-card').classList.toggle('open');
+    });
+    $('phone-card').addEventListener('click', () => $('phone-card').classList.remove('open'));
+  }
   $('backend').textContent = scene.backend;
 
   const loadFiles = async (cwd?: string) => {

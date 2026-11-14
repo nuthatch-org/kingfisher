@@ -14,12 +14,18 @@ pub type ArchiveFile = Arc<Mutex<std::fs::File>>;
 pub struct Hub {
     inner: Mutex<Inner>,
     tx: broadcast::Sender<Frame>,
-    permissions: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    permissions: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
     sessions: Mutex<HashMap<String, SessionInfo>>,
     /// Directories of archived sessions, so a replay can draw its own repository.
     archived_cwds: Mutex<HashSet<PathBuf>>,
     /// Each session's archive, so events the daemon makes itself (permission cards) are kept too.
     archives: Mutex<HashMap<String, ArchiveFile>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Decision {
+    pub allow: bool,
+    pub auto: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -107,7 +113,7 @@ impl Hub {
         (inner.log.clone(), self.tx.subscribe())
     }
 
-    pub fn park_permission(&self, req_id: String) -> oneshot::Receiver<bool> {
+    pub fn park_permission(&self, req_id: String) -> oneshot::Receiver<Decision> {
         let (tx, rx) = oneshot::channel();
         self.permissions.lock().unwrap().insert(req_id, tx);
         rx
@@ -116,9 +122,22 @@ impl Hub {
     /// Returns false if the request was already answered or has timed out.
     pub fn resolve_permission(&self, req_id: &str, allow: bool) -> bool {
         match self.permissions.lock().unwrap().remove(req_id) {
-            Some(tx) => tx.send(allow).is_ok(),
+            Some(tx) => tx.send(Decision { allow, auto: false }).is_ok(),
             None => false,
         }
+    }
+
+    /// Answers everything still waiting, for when autonomous mode is switched on.
+    pub fn allow_all_pending(&self) -> usize {
+        let pending: Vec<_> = self.permissions.lock().unwrap().drain().collect();
+        let n = pending.len();
+        for (_, tx) in pending {
+            let _ = tx.send(Decision {
+                allow: true,
+                auto: true,
+            });
+        }
+        n
     }
 
     /// Returns true if it was still waiting.

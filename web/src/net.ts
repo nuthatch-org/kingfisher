@@ -57,3 +57,8 @@ export async function fetchFiles(cwd?: string): Promise<{ root: string; files: s
   if (!res.ok) return { root: '', files: [] };
   return res.json();
 }
+
+export async function fetchRole(): Promise<{ role: 'control' | 'watch'; phone: string | null }> {
+  const res = await fetch('/api/role');
+  return res.ok ? res.json() : { role: 'watch', phone: null };
+}

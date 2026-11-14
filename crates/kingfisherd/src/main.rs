@@ -58,6 +58,17 @@ struct Cli {
     /// Interrupt a turn silent this many seconds with no tool or permission outstanding. 0 disables.
     #[arg(long, default_value_t = 300)]
     watchdog_secs: u64,
+    /// Start with autonomous mode on: the daemon approves every permission request itself.
+    /// The switch on the page turns it off again.
+    #[arg(long)]
+    autonomous: bool,
+    /// Start with banter on: the agent adds absurd motoring-presenter asides to its chat replies.
+    #[arg(long)]
+    banter: bool,
+    /// Also serve a read-only view on the local network, on port+1, for watching from a phone.
+    /// It needs its own token and can never prompt, approve or switch anything.
+    #[arg(long)]
+    phone: bool,
     /// Extra arguments for claude, after `--`.
     #[arg(last = true)]
     claude_args: Vec<String>,
@@ -83,6 +94,15 @@ fn random_hex(bytes: usize) -> String {
     let mut b = vec![0u8; bytes];
     getrandom::fill(&mut b).expect("os randomness");
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The address this machine uses on its local network. A UDP connect sends no packets; it only
+/// asks the kernel which interface would route there.
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
 }
 
 /// Global hooks carry this token in settings.json, so it has to survive restarts.
@@ -131,8 +151,16 @@ async fn main() -> Result<()> {
 
     let token = random_hex(32);
     let hook_token = hook_token()?;
+    let watch_token = random_hex(16);
+    let phone_port = cli.port + 1;
+    let phone_url = if cli.phone {
+        lan_ip().map(|ip| format!("http://{ip}:{phone_port}/#t={watch_token}"))
+    } else {
+        None
+    };
     let hub = hub::Hub::new();
     let global_hooks = install::has_global_permission_hook(cli.port);
+    let banter = Arc::new(std::sync::atomic::AtomicBool::new(cli.banter));
     let archive_dir = archive::default_dir();
     std::fs::create_dir_all(&archive_dir)
         .with_context(|| format!("creating {}", archive_dir.display()))?;
@@ -158,6 +186,7 @@ async fn main() -> Result<()> {
             archive_dir: archive_dir.clone(),
             watchdog: (cli.watchdog_secs > 0).then(|| Duration::from_secs(cli.watchdog_secs)),
             global_permission_hook: global_hooks,
+            banter: banter.clone(),
         }),
     };
     let agent = match &launcher {
@@ -186,7 +215,12 @@ async fn main() -> Result<()> {
         cwd,
         archive_dir,
         observed_archive: Mutex::new(None),
+        autonomous: std::sync::atomic::AtomicBool::new(cli.autonomous),
+        banter,
+        watch_token,
+        phone_url: phone_url.clone(),
     });
+    web::publish_mode(&state);
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, cli.port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -202,6 +236,30 @@ async fn main() -> Result<()> {
             "xdg-open"
         };
         let _ = std::process::Command::new(opener).arg(&url).spawn();
+    }
+
+    if let Some(url) = &phone_url {
+        let addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, phone_port));
+        let phone = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("binding {addr} for the phone view"))?;
+        println!("watch from a phone on this network (read-only): {url}");
+        if let Ok(code) = qrcode::QrCode::new(url.as_bytes()) {
+            println!(
+                "{}",
+                code.render::<qrcode::render::unicode::Dense1x2>()
+                    .quiet_zone(true)
+                    .build()
+            );
+        }
+        let router = web::watch_router(state.clone());
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(phone, router).await {
+                tracing::warn!("phone view stopped: {e}");
+            }
+        });
+    } else if cli.phone {
+        println!("no LAN address found, so there is no phone view");
     }
 
     axum::serve(listener, web::router(state))

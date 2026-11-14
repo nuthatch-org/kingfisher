@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -19,7 +20,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::agent::{self, AgentCmd, AgentHandle, Launcher};
 use crate::archive;
-use crate::hub::{ArchiveFile, Hub, now_ms};
+use crate::hub::{ArchiveFile, Decision, Hub, now_ms};
 
 #[derive(RustEmbed)]
 #[folder = "../../web/dist"]
@@ -44,6 +45,30 @@ pub struct AppState {
     pub archive_dir: PathBuf,
     /// Opened on the first hook event, so a daemon that observes nothing leaves no empty file.
     pub observed_archive: Mutex<Option<ArchiveFile>>,
+    /// The daemon answers permission requests itself while this is on.
+    pub autonomous: AtomicBool,
+    pub banter: Arc<AtomicBool>,
+    /// For the read-only phone listener; never accepted by the control router.
+    pub watch_token: String,
+    pub phone_url: Option<String>,
+}
+
+/// Which listener a request came in on. The phone one may look, never steer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    Control,
+    Watch,
+}
+
+pub fn publish_mode(s: &AppState) {
+    s.hub.publish(
+        None,
+        None,
+        EventBody::Mode {
+            autonomous: s.autonomous.load(Ordering::Relaxed),
+            banter: s.banter.load(Ordering::Relaxed),
+        },
+    );
 }
 
 impl AppState {
@@ -62,6 +87,8 @@ impl AppState {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/auth", post(auth))
+        .route("/api/role", get(role))
+        .route("/api/phone.svg", get(phone_qr))
         .route("/api/files", get(files))
         .route("/api/sessions", get(sessions))
         .route("/api/sessions/{name}", get(session_events))
@@ -69,8 +96,76 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/hook/permission", post(hook_permission))
         .route("/hook/event", post(hook_event))
         .fallback(get(asset))
+        .layer(Extension(Role::Control))
         .layer(middleware::from_fn_with_state(state.clone(), guard_host))
         .with_state(state)
+}
+
+/// The LAN listener for a phone: the page, the history and the live feed, and nothing that acts.
+/// No Host check here, since the host is whatever address the phone used; the watch token
+/// cookie, scoped to that origin, is what keeps strangers out.
+pub fn watch_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/api/auth", post(auth))
+        .route("/api/role", get(role))
+        .route("/api/files", get(files))
+        .route("/api/sessions", get(sessions))
+        .route("/api/sessions/{name}", get(session_events))
+        .route("/ws", get(ws))
+        .fallback(get(asset))
+        .layer(Extension(Role::Watch))
+        .with_state(state)
+}
+
+async fn role(
+    State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
+    headers: HeaderMap,
+) -> Response {
+    if !authed(&s, role, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let phone = if role == Role::Control {
+        s.phone_url.clone()
+    } else {
+        None
+    };
+    axum::Json(
+        json!({"role": if role == Role::Control { "control" } else { "watch" }, "phone": phone}),
+    )
+    .into_response()
+}
+
+async fn phone_qr(
+    State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
+    headers: HeaderMap,
+) -> Response {
+    if !authed(&s, role, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(url) = &s.phone_url else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match qrcode::QrCode::new(url.as_bytes()) {
+        Ok(code) => {
+            let svg = code
+                .render::<qrcode::render::svg::Color>()
+                .min_dimensions(240, 240)
+                .dark_color(qrcode::render::svg::Color("#0b0d14"))
+                .light_color(qrcode::render::svg::Color("#f0f4ff"))
+                .build();
+            (
+                [
+                    (header::CONTENT_TYPE, "image/svg+xml"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                svg,
+            )
+                .into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// DNS rebinding defence: a page on evil.example resolving to 127.0.0.1 still sends its own Host.
@@ -89,20 +184,31 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn authed(s: &AppState, headers: &HeaderMap) -> bool {
-    let name = s.cookie_name();
+fn authed(s: &AppState, role: Role, headers: &HeaderMap) -> bool {
+    let (name, token) = match role {
+        Role::Control => (s.cookie_name(), &s.token),
+        Role::Watch => (format!("kfw_{}", s.port), &s.watch_token),
+    };
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|kv| kv.trim().split_once('='))
-        .any(|(k, v)| k == name && ct_eq(v.as_bytes(), s.token.as_bytes()))
+        .any(|(k, v)| k == name && ct_eq(v.as_bytes(), token.as_bytes()))
 }
 
-fn same_origin(s: &AppState, headers: &HeaderMap) -> bool {
+fn same_origin(s: &AppState, role: Role, headers: &HeaderMap) -> bool {
     let origin = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok());
-    origin.is_some_and(|o| s.allowed_hosts().iter().any(|h| o == format!("http://{h}")))
+    match role {
+        Role::Control => {
+            origin.is_some_and(|o| s.allowed_hosts().iter().any(|h| o == format!("http://{h}")))
+        }
+        Role::Watch => {
+            let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+            matches!((origin, host), (Some(o), Some(h)) if o == format!("http://{h}"))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -112,22 +218,27 @@ struct AuthBody {
 
 async fn auth(
     State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
     headers: HeaderMap,
     body: axum::Json<AuthBody>,
 ) -> Response {
-    if !same_origin(&s, &headers) || !ct_eq(body.token.as_bytes(), s.token.as_bytes()) {
+    let (name, token) = match role {
+        Role::Control => (s.cookie_name(), &s.token),
+        Role::Watch => (format!("kfw_{}", s.port), &s.watch_token),
+    };
+    if !same_origin(&s, role, &headers) || !ct_eq(body.token.as_bytes(), token.as_bytes()) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let cookie = format!(
-        "{}={}; HttpOnly; SameSite=Strict; Path=/",
-        s.cookie_name(),
-        s.token
-    );
+    let cookie = format!("{name}={token}; HttpOnly; SameSite=Strict; Path=/");
     ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
 }
 
-async fn sessions(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !authed(&s, &headers) {
+async fn sessions(
+    State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
+    headers: HeaderMap,
+) -> Response {
+    if !authed(&s, role, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let dir = s.archive_dir.clone();
@@ -142,10 +253,11 @@ async fn sessions(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Respons
 
 async fn session_events(
     State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
-    if !authed(&s, &headers) {
+    if !authed(&s, role, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if !archive::valid_name(&name) {
@@ -191,10 +303,11 @@ struct FilesQuery {
 
 async fn files(
     State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
     headers: HeaderMap,
     Query(q): Query<FilesQuery>,
 ) -> Response {
-    if !authed(&s, &headers) {
+    if !authed(&s, role, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     // Only directories a session has reported, never an arbitrary path from the page.
@@ -220,23 +333,39 @@ async fn files(
     axum::Json(json!({"root": root, "files": files})).into_response()
 }
 
-async fn ws(State(s): State<Arc<AppState>>, headers: HeaderMap, up: WebSocketUpgrade) -> Response {
-    if !same_origin(&s, &headers) {
+async fn ws(
+    State(s): State<Arc<AppState>>,
+    Extension(role): Extension<Role>,
+    headers: HeaderMap,
+    up: WebSocketUpgrade,
+) -> Response {
+    if !same_origin(&s, role, &headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
-    if !authed(&s, &headers) {
+    if !authed(&s, role, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    up.on_upgrade(move |socket| client(socket, s))
+    up.on_upgrade(move |socket| client(socket, s, role))
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
-    Prompt { text: String },
+    Prompt {
+        text: String,
+    },
     Interrupt,
-    Permission { req_id: String, allow: bool },
-    TakeOver { session: String },
+    Permission {
+        req_id: String,
+        allow: bool,
+    },
+    TakeOver {
+        session: String,
+    },
+    SetMode {
+        autonomous: Option<bool>,
+        banter: Option<bool>,
+    },
 }
 
 fn current_agent(s: &AppState) -> Option<AgentHandle> {
@@ -266,7 +395,7 @@ fn take_over(s: &AppState, session: &str) {
     ));
 }
 
-async fn client(socket: WebSocket, s: Arc<AppState>) {
+async fn client(socket: WebSocket, s: Arc<AppState>, role: Role) {
     let (mut sink, mut stream) = socket.split();
     let (backlog, mut live) = s.hub.snapshot_and_subscribe();
     let batch = format!(
@@ -302,6 +431,9 @@ async fn client(socket: WebSocket, s: Arc<AppState>) {
     let mut recv = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
             let Message::Text(text) = msg else { continue };
+            if role == Role::Watch {
+                continue;
+            }
             let Ok(cmd) = serde_json::from_str::<ClientMsg>(&text) else {
                 continue;
             };
@@ -319,6 +451,18 @@ async fn client(socket: WebSocket, s: Arc<AppState>) {
                     }
                 }
                 ClientMsg::TakeOver { session } => take_over(&s2, &session),
+                ClientMsg::SetMode { autonomous, banter } => {
+                    if let Some(on) = autonomous {
+                        s2.autonomous.store(on, Ordering::Relaxed);
+                        if on {
+                            s2.hub.allow_all_pending();
+                        }
+                    }
+                    if let Some(on) = banter {
+                        s2.banter.store(on, Ordering::Relaxed);
+                    }
+                    publish_mode(&s2);
+                }
                 ClientMsg::Permission { req_id, allow } => {
                     if !s2.hub.resolve_permission(&req_id, allow) {
                         s2.hub
@@ -402,6 +546,27 @@ async fn hook_permission(
     }
     let req_id = ulid_like();
     let session = body["session_id"].as_str().map(str::to_owned);
+    if s.autonomous.load(Ordering::Relaxed) {
+        s.hub.publish(
+            session.clone(),
+            None,
+            EventBody::PermissionRequested {
+                req_id: req_id.clone(),
+                tool: body["tool_name"].as_str().unwrap_or("?").to_owned(),
+                input: body["tool_input"].clone(),
+            },
+        );
+        s.hub.publish(
+            session,
+            None,
+            EventBody::PermissionResolved {
+                req_id,
+                allow: true,
+                auto: true,
+            },
+        );
+        return decision_response(true);
+    }
     let rx = s.hub.park_permission(req_id.clone());
     let _pending = Pending {
         s: &s,
@@ -418,19 +583,29 @@ async fn hook_permission(
         },
     );
 
-    let allow = match tokio::time::timeout(PERMISSION_WAIT, rx).await {
-        Ok(Ok(allow)) => allow,
+    let decision = match tokio::time::timeout(PERMISSION_WAIT, rx).await {
+        Ok(Ok(d)) => d,
         _ => {
             s.hub.forget_permission(&req_id);
-            false
+            Decision {
+                allow: false,
+                auto: false,
+            }
         }
     };
     s.hub.publish(
         session,
         None,
-        EventBody::PermissionResolved { req_id, allow },
+        EventBody::PermissionResolved {
+            req_id,
+            allow: decision.allow,
+            auto: decision.auto,
+        },
     );
+    decision_response(decision.allow)
+}
 
+fn decision_response(allow: bool) -> Response {
     let decision = if allow {
         json!({"behavior": "allow"})
     } else {
@@ -513,6 +688,10 @@ mod tests {
             cwd: ".".into(),
             archive_dir: std::env::temp_dir().join("kingfisher-test-archive"),
             observed_archive: Mutex::new(None),
+            autonomous: AtomicBool::new(false),
+            banter: Arc::new(AtomicBool::new(false)),
+            watch_token: "w4tch".into(),
+            phone_url: None,
         }))
     }
 
@@ -603,6 +782,10 @@ mod tests {
             cwd: ".".into(),
             archive_dir: std::env::temp_dir().join("kingfisher-test-archive"),
             observed_archive: Mutex::new(None),
+            autonomous: AtomicBool::new(false),
+            banter: Arc::new(AtomicBool::new(false)),
+            watch_token: "w4tch".into(),
+            phone_url: None,
         });
         let (_, mut live) = hub.snapshot_and_subscribe();
         let r = req(
@@ -641,6 +824,10 @@ mod tests {
             cwd: ".".into(),
             archive_dir: std::env::temp_dir().join("kingfisher-test-archive"),
             observed_archive: Mutex::new(None),
+            autonomous: AtomicBool::new(false),
+            banter: Arc::new(AtomicBool::new(false)),
+            watch_token: "w4tch".into(),
+            phone_url: None,
         })
     }
 
@@ -689,5 +876,97 @@ mod tests {
         let next: Value = serde_json::from_str(&live.recv().await.unwrap()).unwrap();
         assert_eq!(next["body"]["type"], "permission_withdrawn");
         assert_eq!(hub.pending_permissions(), 0);
+    }
+
+    #[tokio::test]
+    async fn autonomous_mode_answers_at_once_and_says_so() {
+        let hub = Hub::new();
+        let st = state(hub.clone());
+        st.autonomous.store(true, Ordering::Relaxed);
+        let res = router(st)
+            .oneshot(hook_req(
+                "/hook/permission",
+                r#"{"tool_name":"Bash","tool_input":{"command":"ls"},"session_id":"s"}"#,
+            ))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let out: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        let log = hub.snapshot_and_subscribe().0;
+        let last: Value = serde_json::from_str(log.last().unwrap()).unwrap();
+        assert_eq!(last["body"]["type"], "permission_resolved");
+        assert_eq!(last["body"]["auto"], true);
+        assert_eq!(hub.pending_permissions(), 0);
+    }
+
+    #[tokio::test]
+    async fn switching_autonomous_on_releases_what_is_waiting() {
+        let hub = Hub::new();
+        let rx = hub.park_permission("r1".into());
+        assert_eq!(hub.allow_all_pending(), 1);
+        let d = rx.await.unwrap();
+        assert!(d.allow && d.auto);
+    }
+
+    #[tokio::test]
+    async fn the_phone_listener_cannot_steer_or_use_the_control_token() {
+        let hub = Hub::new();
+        let app = watch_router(state(hub.clone()));
+        let lan = [
+            ("host", "192.168.1.20:7778"),
+            ("origin", "http://192.168.1.20:7778"),
+            ("content-type", "application/json"),
+        ];
+        let r = req("POST", "/api/auth", &lan, r#"{"token":"t0k"}"#);
+        assert_eq!(
+            app.clone().oneshot(r).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let r = req("POST", "/api/auth", &lan, r#"{"token":"w4tch"}"#);
+        assert_eq!(
+            app.clone().oneshot(r).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let r = req(
+            "POST",
+            "/hook/permission",
+            &[
+                ("host", "192.168.1.20:7778"),
+                ("authorization", "Bearer h00k"),
+            ],
+            "{}",
+        );
+        assert_eq!(
+            app.clone().oneshot(r).await.unwrap().status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        let r = req(
+            "GET",
+            "/api/files",
+            &[("host", "192.168.1.20:7778"), ("cookie", "kf_7777=t0k")],
+            "",
+        );
+        assert_eq!(
+            app.oneshot(r).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn the_watch_cookie_does_not_open_the_control_side() {
+        let app = router(state(Hub::new()));
+        let r = req(
+            "GET",
+            "/api/files",
+            &[("host", "127.0.0.1:7777"), ("cookie", "kfw_7777=w4tch")],
+            "",
+        );
+        assert_eq!(
+            app.oneshot(r).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

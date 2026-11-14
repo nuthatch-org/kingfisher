@@ -69,10 +69,18 @@
       <span class="chip dim" id="backend">…</span>
       <span class="chip dim" id="files">…</span>
       <span class="chip dim" id="version"></span>
+      <button class="chip" id="auto" type="button">ask me</button>
+      <button class="chip dim" id="banter" type="button">banter off</button>
       <button class="chip dim" id="sound" type="button">sound off</button>
+      <button class="chip" id="phone" type="button" hidden>phone</button>
     </footer>
 
     <div id="tip"></div>
+    <div id="phone-card">
+      <img id="phone-qr" alt="QR code for the phone view" />
+      <div>Scan to watch from a phone on this network. Read-only.</div>
+      <div id="phone-url"></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

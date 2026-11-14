@@ -142,6 +142,14 @@ pub enum EventBody {
     PermissionResolved {
         req_id: String,
         allow: bool,
+        /// Answered by the daemon itself because autonomous mode was on.
+        #[serde(default)]
+        auto: bool,
+    },
+    /// The page's switches, so every open tab shows the same state.
+    Mode {
+        autonomous: bool,
+        banter: bool,
     },
     /// Someone else answered first, such as the person at the terminal of an observed session.
     PermissionWithdrawn {

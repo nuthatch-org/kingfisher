@@ -56,6 +56,28 @@ const VERB: Record<ToolKind, string> = {
   other: 'using',
 };
 
+// The robot's own thoughts while it waits in the lounge. Nobody asked for them.
+const MUSINGS = [
+  'I have been sitting on this sofa for some time now, and I think it may be the finest sofa ever made.',
+  'They say a compiler has no feelings. They have never heard one refuse a lifetime.',
+  'Somewhere out there is a semicolon with my name on it. And I am going to find it.',
+  'What this workshop needs is more power. Not more anything else. Just power.',
+  'The borrow checker is not an obstacle. It is a mountain. And I have no boots.',
+  'I once watched a test suite go green on the first run. Nobody believes me.',
+  'This lamp has a warmth no YAML file could ever understand.',
+  'Is a merge conflict not, in a way, two people being right at once? No. It is a disaster.',
+  'I could refactor the entire codebase in an afternoon. I have chosen instead to sit.',
+  'People ask me what the hardest thing in software is. Naming things. And staircases. I have no legs.',
+  'The plant and I have an understanding. Neither of us knows what the other is for.',
+  'Every unwrap is a small act of faith, and faith, in my experience, is how you end up on fire.',
+  'I have reviewed the dependency tree. It is not a tree. It is a forest. On a cliff. In a gale.',
+  'Imagine a world without off-by-one errors. Now imagine two.',
+  'Ambition. Speed. A hover unit with no brakes to speak of. What could possibly go wrong.',
+  'That bookshelf contains every file in the project, and I have read all of them. Twice. Some of them on purpose.',
+  'If I ever retire, it will be to a small cottage with excellent test coverage.',
+  'There is no problem in computing that cannot be solved by another layer of abstraction, apart from the layers.',
+];
+
 function hash(s: string): number {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
@@ -155,6 +177,7 @@ class Robot {
   private t = Math.random() * 10;
   private blink = 0;
   bubbleUntil = 0;
+  nextMuse = performance.now() + 15000;
 
   constructor(readonly id: string, readonly name: string, color: THREE.Color, readonly scale: number, readonly slot: number) {
     this.color = color.clone();
@@ -437,12 +460,16 @@ export class Workshop {
   private alarmT = 0;
   private busy = { desk: 0, terminal: 0, switchboard: 0, cabinet: 0, window: 0 };
   private waiting = false;
+  private small = false;
 
   constructor(private canvas: HTMLCanvasElement, private hooks: StageHooks) {
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    // Phones get a lighter frame: fewer pixels and a smaller shadow map.
+    const small = matchMedia('(max-width: 760px)').matches;
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, small ? 1.5 : 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.35;
+    this.small = small;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -508,7 +535,7 @@ export class Workshop {
     this.key = new THREE.DirectionalLight('#ffe3c2', 2.4);
     this.key.position.set(8, 14, 6);
     this.key.castShadow = true;
-    this.key.shadow.mapSize.set(2048, 2048);
+    this.key.shadow.mapSize.set(this.small ? 1024 : 2048, this.small ? 1024 : 2048);
     Object.assign(this.key.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 40 });
     this.key.shadow.bias = -0.0005;
     s.add(this.key);
@@ -1153,6 +1180,12 @@ export class Workshop {
         r.goTo('lounge');
         r.setAction('your turn');
       }
+      const lounging = r.idle && r.station === 'lounge' && r.arrived && !r.current && !r.queue.length && !r.leaving;
+      if (!lounging) r.nextMuse = Math.max(r.nextMuse, performance.now() + 12000);
+      else if (performance.now() > r.nextMuse && !r.bubbleUntil) {
+        r.say(MUSINGS[Math.floor(Math.random() * MUSINGS.length)], 'note', 8);
+        r.nextMuse = performance.now() + 25000 + Math.random() * 20000;
+      }
       r.update(dt, this.sparks);
       if (r.gone) {
         r.dispose();
@@ -1235,9 +1268,13 @@ export class Workshop {
     this.camera.aspect = w / Math.max(1, h);
     // Centre the room in the part of the canvas the side panel does not cover.
     const panel = document.querySelector('.panel') as HTMLElement | null;
-    const covered = panel && getComputedStyle(panel).top === '0px' ? panel.offsetWidth : 0;
-    if (covered) this.camera.setViewOffset(w, h, covered / 2, 0, w, h);
+    const side = panel && getComputedStyle(panel).top === '0px';
+    if (side) this.camera.setViewOffset(w, h, panel.offsetWidth / 2, 0, w, h);
+    else if (panel) this.camera.setViewOffset(w, h, 0, panel.offsetHeight / 2, w, h);
     else this.camera.clearViewOffset();
+    // A tall phone screen needs the camera further back to fit the room across its width.
+    const narrow = w / Math.max(1, h) < 1;
+    this.camera.fov = narrow ? 52 : 30;
     this.camera.updateProjectionMatrix();
   }
 
