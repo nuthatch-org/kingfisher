@@ -46,6 +46,15 @@ cannot prompt, approve, switch modes or take over, and anything it sends is drop
 WebGL2 rather than WebGPU, because browsers only offer WebGPU on secure origins and a plain-http LAN
 address is not one. macOS may ask once whether `kingfisherd` may accept incoming connections.
 
+### Watching over Tailscale
+
+`--tailscale` puts the same read-only view on your tailnet at `https://<machine>.<tailnet>.ts.net`
+with a real certificate, reachable from anywhere on the tailnet, and with WebGPU, since that is a
+secure origin. It runs `tailscale serve` in the foreground as a child process, so the route exists
+only while the daemon runs and nothing is written to your Tailscale config. The watch listener then
+binds to localhost only. `--tailscale-port` picks another HTTPS port than 443. On macOS the CLI
+inside `Tailscale.app` is used when `tailscale` is not on the path.
+
 ### Watching sessions you started yourself
 
 ```sh

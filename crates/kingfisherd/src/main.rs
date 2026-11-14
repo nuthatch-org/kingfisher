@@ -69,6 +69,13 @@ struct Cli {
     /// It needs its own token and can never prompt, approve or switch anything.
     #[arg(long)]
     phone: bool,
+    /// Serve the read-only view on your tailnet over HTTPS with `tailscale serve`, for as long as
+    /// the daemon runs. The watch listener then binds to localhost only, unless --phone is given too.
+    #[arg(long)]
+    tailscale: bool,
+    /// HTTPS port on the tailnet name.
+    #[arg(long, default_value_t = 443)]
+    tailscale_port: u16,
     /// Extra arguments for claude, after `--`.
     #[arg(last = true)]
     claude_args: Vec<String>,
@@ -103,6 +110,57 @@ fn lan_ip() -> Option<std::net::IpAddr> {
     sock.connect("192.0.2.1:9").ok()?;
     let ip = sock.local_addr().ok()?.ip();
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+fn tailscale_cli() -> String {
+    const APP: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+    let on_path = std::process::Command::new("tailscale")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if on_path || !std::path::Path::new(APP).exists() {
+        "tailscale".into()
+    } else {
+        APP.into()
+    }
+}
+
+fn tailnet_name() -> Option<String> {
+    let out = std::process::Command::new(tailscale_cli())
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let name = v["Self"]["DNSName"].as_str()?.trim_end_matches('.');
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Foreground `tailscale serve`: its route belongs to this process and goes when it does,
+/// so nothing is left in the user's Tailscale config.
+fn tailscale_serve(https_port: u16, local_port: u16) -> Result<tokio::process::Child> {
+    tokio::process::Command::new(tailscale_cli())
+        .args([
+            "serve",
+            &format!("--https={https_port}"),
+            &format!("http://127.0.0.1:{local_port}"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting tailscale serve")
+        .map(|mut child| {
+            if let Some(err) = child.stderr.take() {
+                tokio::spawn(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let mut lines = tokio::io::BufReader::new(err).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::warn!(target: "tailscale", "{line}");
+                    }
+                });
+            }
+            child
+        })
 }
 
 /// Global hooks carry this token in settings.json, so it has to survive restarts.
@@ -153,11 +211,24 @@ async fn main() -> Result<()> {
     let hook_token = hook_token()?;
     let watch_token = random_hex(16);
     let phone_port = cli.port + 1;
-    let phone_url = if cli.phone {
+    let lan_url = if cli.phone {
         lan_ip().map(|ip| format!("http://{ip}:{phone_port}/#t={watch_token}"))
     } else {
         None
     };
+    let tailnet = if cli.tailscale {
+        let name = tailnet_name()
+            .context("--tailscale: no tailnet name; is Tailscale running and logged in?")?;
+        let port = match cli.tailscale_port {
+            443 => String::new(),
+            p => format!(":{p}"),
+        };
+        Some(format!("https://{name}{port}/#t={watch_token}"))
+    } else {
+        None
+    };
+    // The tailnet address works from anywhere on the tailnet, so it is the one to hand out.
+    let phone_url = tailnet.clone().or(lan_url.clone());
     let hub = hub::Hub::new();
     let global_hooks = install::has_global_permission_hook(cli.port);
     let banter = Arc::new(std::sync::atomic::AtomicBool::new(cli.banter));
@@ -238,13 +309,33 @@ async fn main() -> Result<()> {
         let _ = std::process::Command::new(opener).arg(&url).spawn();
     }
 
-    if let Some(url) = &phone_url {
-        let addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, phone_port));
+    let mut _serve = None;
+    if phone_url.is_some() {
+        let ip = if cli.phone {
+            Ipv4Addr::UNSPECIFIED
+        } else {
+            Ipv4Addr::LOCALHOST
+        };
+        let addr = SocketAddr::from((ip, phone_port));
         let phone = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("binding {addr} for the phone view"))?;
-        println!("watch from a phone on this network (read-only): {url}");
-        if let Ok(code) = qrcode::QrCode::new(url.as_bytes()) {
+        let router = web::watch_router(state.clone());
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(phone, router).await {
+                tracing::warn!("phone view stopped: {e}");
+            }
+        });
+        if let Some(url) = &lan_url {
+            println!("watch on this network (read-only): {url}");
+        }
+        if let Some(url) = &tailnet {
+            _serve = Some(tailscale_serve(cli.tailscale_port, phone_port)?);
+            println!("watch from anywhere on your tailnet (read-only): {url}");
+        }
+        if let Some(url) = &phone_url
+            && let Ok(code) = qrcode::QrCode::new(url.as_bytes())
+        {
             println!(
                 "{}",
                 code.render::<qrcode::render::unicode::Dense1x2>()
@@ -252,19 +343,20 @@ async fn main() -> Result<()> {
                     .build()
             );
         }
-        let router = web::watch_router(state.clone());
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(phone, router).await {
-                tracing::warn!("phone view stopped: {e}");
-            }
-        });
     } else if cli.phone {
         println!("no LAN address found, so there is no phone view");
     }
 
     axum::serve(listener, web::router(state))
+        // SIGTERM too, or `kill` skips the drops that take tailscale serve and claude down with us.
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
         })
         .await?;
     Ok(())

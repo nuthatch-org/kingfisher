@@ -206,7 +206,8 @@ fn same_origin(s: &AppState, role: Role, headers: &HeaderMap) -> bool {
         }
         Role::Watch => {
             let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
-            matches!((origin, host), (Some(o), Some(h)) if o == format!("http://{h}"))
+            // Plain http on the LAN, https when Tailscale serve fronts it.
+            matches!((origin, host), (Some(o), Some(h)) if o == format!("http://{h}") || o == format!("https://{h}"))
         }
     }
 }

@@ -26,7 +26,7 @@ export function connect(handlers: {
   let ever = false;
 
   const open = () => {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     let first = true;
     ws.onopen = () => {
       ever = true;
