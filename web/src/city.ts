@@ -292,14 +292,14 @@ export class City {
   }
 
   private labelDistricts() {
-    const biggest = [...this.districts.entries()].sort((a, b) => b[1].w * b[1].d - a[1].w * a[1].d).slice(0, 7);
+    const biggest = [...this.districts.entries()].sort((a, b) => b[1].w * b[1].d - a[1].w * a[1].d).slice(0, 14);
     for (const [name, r] of biggest) {
-      if (r.w * r.d < 0.25) continue;
+      if (r.w * r.d < 0.12) continue;
       const el = document.createElement('div');
       el.className = 'district-label';
       el.textContent = name === '·' ? '(root)' : name;
       const label = new CSS2DObject(el);
-      label.position.set(r.x + r.w / 2, this.height + 0.08, r.z + r.d - 0.05);
+      label.position.set(r.x + r.w / 2, this.height + 0.08, r.z + r.d / 2);
       this.group.add(label);
       this.labels.push(label);
     }
@@ -405,6 +405,25 @@ export class City {
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
     this.mesh.computeBoundingSphere();
     this.dirty = false;
+  }
+
+  /**
+   * Hide labels that would overlap a bigger district's, given where they land on screen.
+   * They are already sorted biggest first, so the big districts keep their names.
+   */
+  cullLabels(camera: THREE.Camera, width: number, height: number) {
+    const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
+    const v = new THREE.Vector3();
+    for (const l of this.labels) {
+      l.getWorldPosition(v).project(camera);
+      const x = ((v.x + 1) / 2) * width;
+      const y = ((1 - v.y) / 2) * height;
+      const w = l.element.textContent!.length * 6.6 + 14;
+      const box = { x0: x - w / 2, x1: x + w / 2, y0: y - 9, y1: y + 9 };
+      const clash = placed.some((p) => box.x0 < p.x1 && box.x1 > p.x0 && box.y0 < p.y1 && box.y1 > p.y0);
+      l.element.style.visibility = clash ? 'hidden' : 'visible';
+      if (!clash) placed.push(box);
+    }
   }
 
   pick(ray: THREE.Raycaster): string | null {

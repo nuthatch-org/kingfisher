@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use kingfisher_events::ClaudeNormalizer;
+use kingfisher_events::{ClaudeNormalizer, EventBody};
 
 use crate::hub::Hub;
 
@@ -41,16 +41,78 @@ fn tail(path: &Path, bytes: u64) -> Result<String> {
 }
 
 pub async fn run(path: PathBuf, hub: Arc<Hub>) -> Result<()> {
+    run_from(path, hub, BACKLOG_BYTES).await
+}
+
+/// Every session whose transcript was written to within `window`, each followed as it appears.
+/// Runs until the daemon stops; new sessions are picked up on the next scan.
+pub async fn run_all(projects: PathBuf, hub: Arc<Hub>, window: Duration) -> Result<()> {
+    let mut following = std::collections::HashSet::new();
+    hub.notice(format!(
+        "following every session active in the last {} minutes",
+        window.as_secs() / 60
+    ));
+    loop {
+        for path in active_transcripts(&projects, window) {
+            if following.insert(path.clone()) {
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    // A smaller backlog each, since several sessions share one page.
+                    if let Err(e) = run_from(path.clone(), hub.clone(), 400_000).await {
+                        hub.notice(format!("stopped following {}: {e:#}", path.display()));
+                    }
+                });
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
+/// `<projects>/<dir>/<session>.jsonl`, modified within `window`. Subagent transcripts live a
+/// level deeper and are left out; their work shows through the parent's Task calls.
+pub fn active_transcripts(projects: &Path, window: Duration) -> Vec<PathBuf> {
+    let now = std::time::SystemTime::now();
+    let Ok(dirs) = std::fs::read_dir(projects) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for dir in dirs.flatten().filter(|d| d.path().is_dir()) {
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            let fresh = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age < window);
+            if fresh && p.extension().is_some_and(|e| e == "jsonl") {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+async fn run_from(path: PathBuf, hub: Arc<Hub>, backlog: u64) -> Result<()> {
     let mut f =
         std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
     let len = f.metadata()?.len();
     let mut normalizer = ClaudeNormalizer::for_transcript();
-    let start = len.saturating_sub(BACKLOG_BYTES);
+    let start = len.saturating_sub(backlog);
     f.seek(SeekFrom::Start(start))?;
     // Bytes, not text: a read can end inside a multi-byte character as well as inside a line.
     let mut pending: Vec<u8> = Vec::new();
     let mut skip_fragment = start > 0;
-    hub.notice(format!("following {}", path.display()));
+    hub.notice(format!(
+        "following {}",
+        path.parent()
+            .and_then(|d| d.file_name())
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
 
     loop {
         let mut buf = Vec::new();
@@ -67,6 +129,11 @@ pub async fn run(path: PathBuf, hub: Arc<Hub>) -> Result<()> {
                 let line = String::from_utf8_lossy(&raw);
                 let out = normalizer.line(line.trim_end());
                 for body in out.bodies {
+                    // Lets the page fetch this session's own file list for its city.
+                    if let (EventBody::SessionStarted { cwd, .. }, Some(id)) = (&body, &out.session)
+                    {
+                        hub.note_session(id, PathBuf::from(cwd), false);
+                    }
                     hub.publish(out.session.clone(), out.parent.clone(), body);
                 }
             }

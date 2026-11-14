@@ -60,6 +60,29 @@ class App {
   readonly sound = new Sonifier();
   /** Set by main: an observed session living in another repository swaps the sky to it. */
   onCwd: (cwd: string) => void = () => {};
+  /** The session whose city is on the table and whose transcript is shown. */
+  private focused: string | null = null;
+  private curSession: string | null = null;
+  private sessionCwd = new Map<string, string>();
+
+  /** Every transcript element is tagged with its session, so focus can filter the log. */
+  private put(el: HTMLElement) {
+    if (this.curSession) el.dataset.session = this.curSession;
+    el.hidden = !!(this.focused && this.curSession && this.curSession !== this.focused);
+    this.log.append(el);
+  }
+
+  setFocus(session: string | null) {
+    if (!session || session === this.focused) return;
+    this.focused = session;
+    for (const el of this.log.children as HTMLCollectionOf<HTMLElement>) {
+      el.hidden = !!(el.dataset.session && el.dataset.session !== session);
+    }
+    this.scene.setFocus(session);
+    const cwd = this.sessionCwd.get(session);
+    if (cwd && cwd.replace(/\/$/, '') !== this.root) this.onCwd(cwd);
+    requestAnimationFrame(() => (this.log.scrollTop = this.log.scrollHeight));
+  }
 
   constructor(private scene: Workshop) {}
 
@@ -154,6 +177,7 @@ class App {
       this.divider(e.session, false);
     }
     if (e.session) this.lastSession = e.session;
+    this.curSession = e.session;
     switch (b.type) {
       case 'session_started': {
         // Hook-observed sessions carry no auth source; only stream-json sessions report one.
@@ -180,7 +204,12 @@ class App {
           this.divider(e.session, observed, `${b.cwd.split('/').pop() || b.cwd} · ${b.permission_mode ?? 'default'} permissions`);
         }
         if (!sub) this.scene.session(e.session, b.cwd);
-        if (b.cwd && b.cwd.replace(/\/$/, '') !== this.root) this.onCwd(b.cwd);
+        if (!sub && e.session) {
+          this.sessionCwd.set(e.session, b.cwd);
+          if (!this.focused) this.setFocus(e.session);
+        } else if (!e.session && b.cwd && b.cwd.replace(/\/$/, '') !== this.root) {
+          this.onCwd(b.cwd);
+        }
         break;
       }
       case 'session_ended':
@@ -209,7 +238,7 @@ class App {
           const d = el('details', 'think' + (sub ? ' sub' : '')) as HTMLDetailsElement;
           this.thinkSummary = el('summary', '', 'thinking');
           d.append(this.thinkSummary, el('div', 'body'));
-          this.log.append(d);
+          this.put(d);
           this.thinkEl = d.querySelector('.body');
           this.thinkTokens = 0;
         }
@@ -363,7 +392,7 @@ class App {
 
   private entry(cls: string, text: string): HTMLElement {
     const e = el('div', `entry ${cls}`, text);
-    this.log.append(e);
+    this.put(e);
     return e;
   }
 
@@ -410,7 +439,7 @@ class App {
     }
     row.append(head, detail);
     head.addEventListener('click', () => row.classList.toggle('open'));
-    this.log.append(row);
+    this.put(row);
     return row;
   }
 
@@ -423,7 +452,7 @@ class App {
       b.addEventListener('click', () => this.link.send({ type: 'take_over', session }));
       d.append(b);
     }
-    this.log.append(d);
+    this.put(d);
   }
 
   private tick(row: HTMLElement, kind: ToolKind, tool: string, input: any): HTMLElement {
@@ -546,6 +575,7 @@ async function main() {
       tip.classList.add('show');
     },
     pick: (path) => app.showFile(path),
+    focus: (session) => app.setFocus(session),
     files: (n) => ($('files').textContent = `${n} files`),
   });
   app = new App(scene);

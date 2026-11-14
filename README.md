@@ -66,6 +66,10 @@ kingfisher. The transcript format is internal to Claude Code and changes between
 is best effort: no token streaming and no permission cards, and the session keeps being driven from
 its own terminal.
 
+`--follow-all` does the same for every session whose transcript changed in the last 20 minutes,
+and picks up new ones as they start. Each session is its own robot, named after its project; click
+a robot's name tag to put that project's city on the table and show only that session's transcript.
+
 ### Watching sessions you started yourself
 
 ```sh

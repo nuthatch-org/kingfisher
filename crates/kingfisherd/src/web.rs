@@ -334,7 +334,11 @@ async fn files(
     // Sizes give the city its skyline; a file deleted since `git ls-files` ran is just size 0.
     let sizes: Vec<u64> = files
         .iter()
-        .map(|f| std::fs::metadata(root.join(f)).map(|m| m.len()).unwrap_or(0))
+        .map(|f| {
+            std::fs::metadata(root.join(f))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        })
         .collect();
     axum::Json(json!({"root": root, "files": files, "sizes": sizes})).into_response()
 }

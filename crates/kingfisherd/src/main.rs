@@ -38,6 +38,10 @@ struct Cli {
     /// did not start and that have no hooks.
     #[arg(long, conflicts_with = "replay")]
     follow: Option<PathBuf>,
+    /// Follow every Claude Code session whose transcript changed in the last 20 minutes, and any
+    /// that start later, each as its own robot.
+    #[arg(long, conflicts_with_all = ["replay", "follow"])]
+    follow_all: bool,
     /// Replay speed multiplier.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
@@ -270,6 +274,19 @@ async fn main() -> Result<()> {
             banter: banter.clone(),
         }),
     };
+    if cli.follow_all {
+        let projects = dirs::home_dir()
+            .context("no home directory")?
+            .join(".claude/projects");
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                follow::run_all(projects, hub.clone(), Duration::from_secs(20 * 60)).await
+            {
+                hub.notice(format!("follow-all stopped: {e:#}"));
+            }
+        });
+    }
     if let Some(path) = cli.follow.clone() {
         let hub = hub.clone();
         tokio::spawn(async move {
@@ -279,7 +296,7 @@ async fn main() -> Result<()> {
         });
     }
     let agent = match &launcher {
-        Some(l) if !cli.observe && cli.follow.is_none() => Some(agent::start(
+        Some(l) if !cli.observe && cli.follow.is_none() && !cli.follow_all => Some(agent::start(
             l.config(cwd.clone(), cli.resume.clone()),
             hub.clone(),
         )),

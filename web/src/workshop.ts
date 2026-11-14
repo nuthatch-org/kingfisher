@@ -179,6 +179,10 @@ class Robot {
   private t = Math.random() * 10;
   private blink = 0;
   bubbleUntil = 0;
+  onTag?: () => void;
+  setFocused(on: boolean) {
+    this.tag.classList.toggle('focused', on);
+  }
   nextMuse = performance.now() + 15000;
 
   constructor(readonly id: string, readonly name: string, color: THREE.Color, readonly scale: number, readonly slot: number) {
@@ -238,6 +242,8 @@ class Robot {
     this.tag = document.createElement('div');
     this.tag.className = 'bot-tag';
     this.tag.textContent = name;
+    this.tag.title = 'Show this project on the table and this session in the transcript';
+    this.tag.addEventListener('click', () => this.onTag?.());
     this.act = document.createElement('div');
     this.act.className = 'bot-act';
     label.append(this.bubble, this.tag, this.act);
@@ -473,6 +479,7 @@ export interface StageHooks {
   hover(path: string | null, x: number, y: number): void;
   pick(path: string): void;
   files(count: number): void;
+  focus(session: string | null): void;
 }
 
 export interface ToolCallInfo {
@@ -519,6 +526,7 @@ export class Workshop {
   private busy = { desk: 0, terminal: 0, switchboard: 0, cabinet: 0, window: 0 };
   private waiting = false;
   private small = false;
+  private labelTick = 0;
 
   constructor(private canvas: HTMLCanvasElement, private hooks: StageHooks) {
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
@@ -970,7 +978,13 @@ export class Workshop {
   session(id: string | null, cwd: string) {
     const r = this.robotFor(id, null);
     const name = cwd.split('/').pop() || 'agent';
-    r.setAction(`ready in ${name}`);
+    r.rename(name);
+    r.onTag = () => this.hooks.focus(id);
+    if (!r.current) r.setAction(`ready in ${name}`);
+  }
+
+  setFocus(session: string | null) {
+    for (const [key, r] of this.robots) r.setFocused(key === session);
   }
 
   turnStarted(session: string | null, prompt: string, live: boolean) {
@@ -1322,6 +1336,10 @@ export class Workshop {
     this.controls.update(dt);
     this.pipeline.render();
     this.labels.render(this.scene, this.camera);
+    if ((this.labelTick = (this.labelTick + 1) % 10) === 0) {
+      const r = this.canvas.getBoundingClientRect();
+      this.city.cullLabels(this.camera, r.width, r.height);
+    }
   }
 
   private resize() {
