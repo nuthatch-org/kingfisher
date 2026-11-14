@@ -454,8 +454,6 @@ export class Workshop {
     this.controls.maxPolarAngle = Math.PI * 0.46;
     this.controls.minDistance = 8;
     this.controls.maxDistance = 48;
-    this.controls.autoRotate = true;
-    this.controls.autoRotateSpeed = 0.12;
 
     const bg = new THREE.Color('#0b0d14');
     this.scene.background = bg;
@@ -1223,7 +1221,6 @@ export class Workshop {
     for (const r of this.robots.values()) if (r.asking) this.spot.target.position.lerp(r.pos, dt * 4);
 
     this.sparks.step(dt);
-    this.controls.autoRotate = !this.waiting;
     this.controls.update(dt);
     this.pipeline.render();
     this.labels.render(this.scene, this.camera);

@@ -1,8 +1,11 @@
 # kingfisher
 
-A local, browser-based live view of a coding agent at work. A Rust daemon on 127.0.0.1 owns the
-agent process, normalises its event stream, and feeds a WebGPU scene in a browser tab where one
-can watch, chat back, interrupt, and approve permission requests.
+A local, browser-based live view of coding agents at work. A Rust daemon on 127.0.0.1 owns the
+agent process, normalises its event stream, and feeds a 3D workshop in a browser tab: each agent
+is a small robot that walks to the bookshelf to read, the desk to edit, the terminal to run
+commands, and so on, while the project fills the shelves as files appear. Helpers arrive through
+a portal, permission requests put a spotlight on the robot asking, and from the same page one can
+chat back, interrupt, and approve.
 
 Runs Claude Code first, by spawning the unmodified official `claude` binary under the user's own
 login. kingfisher never reads, stores or forwards credentials. Other agents come later, through
@@ -69,7 +72,7 @@ Found in testing, against the report:
 
 | Milestone | Scope |
 |---|---|
-| Weekend MVP | Daemon spawns `claude -p` in bidirectional stream-json; `PermissionRequest` HTTP hook for approvals; cosmic scene, transcript panel, chat, interrupt; NDJSON archive and replay |
+| Weekend MVP | Daemon spawns `claude -p` in bidirectional stream-json; `PermissionRequest` HTTP hook for approvals; workshop scene, transcript panel, chat, interrupt; NDJSON archive and replay |
 | v0.2 | Done: global hooks to observe hand-started sessions; take over via `--resume`; timeline strip, diffs, sound, hang watchdog. Session library with scrubbing replay. Left: terminal pane |
 | v0.3 | ACP and Codex adapters; multi-session; more themes; optional OTLP receiver |
 
